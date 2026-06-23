@@ -15,7 +15,9 @@ app = FastAPI(title="Live Checker + Balance Sorter API")
 security = HTTPBearer()
 
 # ================== AUTH ==================
-AUTH_TOKEN = "b9f3k7m2v8t3w5z1q6p9c4b7n2v8m2025"  # Değiştir!
+AUTH_TOKEN = os.getenv("AUTH_TOKEN")
+if not AUTH_TOKEN:
+    raise RuntimeError("AUTH_TOKEN environment variable is not set. Please configure it in your .env file.")
 
 def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
     if credentials.credentials != AUTH_TOKEN:
