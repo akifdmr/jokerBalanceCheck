@@ -5,26 +5,44 @@ import requests, re, time, random, itertools, threading, asyncio
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from pymongo import MongoClient
-from dotenv import load_dotenv
 import json
 import os
-
-load_dotenv()
 
 app = FastAPI(title="Live Checker + Balance Sorter API")
 security = HTTPBearer()
 
-# ================== AUTH ==================
-AUTH_TOKEN = os.getenv("AUTH_TOKEN")
-if not AUTH_TOKEN:
-    raise RuntimeError("AUTH_TOKEN environment variable is not set. Please configure it in your .env file.")
+# ================== AUTH (SABİT) ==================
+AUTH_TOKEN = "b9f3k7m2v8t3w5z1q6p9c4b7n2v8m2025"
 
 def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
     if credentials.credentials != AUTH_TOKEN:
         raise HTTPException(status_code=401, detail="Geçersiz token")
     return credentials.credentials
 
-# ================== MONGO DB ==================
+# ================== MONGO DB (SABİT) ==================
+MONGODB_URI = "mongodb+srv://paymentmanger.gvaavzc.mongodb.net/?authSource=%24external&authMechanism=MONGODB-X509&appName=paymentmanger"
+try:
+    client = MongoClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
+    db = client["paymentmanger"]
+    collection = db["live_balance_results"]
+    print("[+] MongoDB bağlantısı başarılı")
+except Exception as e:
+    print(f"[!] MongoDB hatası: {e}")
+    collection = None
+
+# ================== PROXY ROTASYONU ==================
+proxies_list = [
+    "http://akifdemi55574:llfg52end4@192.158.235.162:21250",
+    "http://akifdemi55574:llfg52end4@160.202.94.136:21323",
+    "http://akifdemi55574:llfg52end4@104.143.228.9:21320",
+    "http://akifdemi55574:llfg52end4@179.61.252.53:21308",
+    "http://akifdemi55574:llfg52end4@191.96.30.51:21276",
+    "http://akifdemi55574:llfg52end4@45.155.68.129:21305",
+    "http://akifdemi55574:llfg52end4@212.113.120.227:21311",
+    "http://akifdemi55574:llfg52end4@185.165.29.97:21314"
+]
+proxy_cycle = itertools.cycle(proxies_list)
+================= MONGO DB ==================
 MONGODB_URI = "mongodb+srv://paymentmanger.gvaavzc.mongodb.net/?authSource=%24external&authMechanism=MONGODB-X509&appName=paymentmanger"
 try:
     client = MongoClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
