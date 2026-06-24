@@ -1,0 +1,1253 @@
+{
+  "source": "CardMarket-PaymentApi.postman_collection.json",
+  "collection": "CardMarket PaymentApi",
+  "total": 178,
+  "methods": [
+    {
+      "group": "Deploy / Meta",
+      "name": "Local Health",
+      "method": "GET",
+      "path": "/health",
+      "auth": "noauth"
+    },
+    {
+      "group": "Deploy / Meta",
+      "name": "Render Health",
+      "method": "GET",
+      "path": "/health",
+      "auth": "noauth"
+    },
+    {
+      "group": "Deploy / Meta",
+      "name": "React App",
+      "method": "GET",
+      "path": "/react/",
+      "auth": "noauth"
+    },
+    {
+      "group": "Deploy / Meta",
+      "name": "OpenAPI JSON",
+      "method": "GET",
+      "path": "/openapi.json",
+      "auth": "noauth"
+    },
+    {
+      "group": "Deploy / Meta",
+      "name": "Download Postman Collection",
+      "method": "GET",
+      "path": "/api/meta/postman/collection",
+      "auth": "noauth"
+    },
+    {
+      "group": "Deploy / Meta",
+      "name": "Download Postman Environment",
+      "method": "GET",
+      "path": "/api/meta/postman/environment",
+      "auth": "noauth"
+    },
+    {
+      "group": "Authentication",
+      "name": "Login",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "auth": "noauth"
+    },
+    {
+      "group": "Authentication",
+      "name": "Current User",
+      "method": "GET",
+      "path": "/api/auth/me",
+      "auth": "basic"
+    },
+    {
+      "group": "Authentication",
+      "name": "Logout",
+      "method": "POST",
+      "path": "/api/auth/logout",
+      "auth": "basic"
+    },
+    {
+      "group": "System",
+      "name": "MongoDB Status",
+      "method": "GET",
+      "path": "/api/system/mongodb/status",
+      "auth": "basic"
+    },
+    {
+      "group": "System",
+      "name": "System Health",
+      "method": "GET",
+      "path": "/api/system/health",
+      "auth": "basic"
+    },
+    {
+      "group": "System",
+      "name": "Run System Health Check",
+      "method": "POST",
+      "path": "/api/system/health/check",
+      "auth": "basic"
+    },
+    {
+      "group": "System",
+      "name": "Provider Status Table",
+      "method": "GET",
+      "path": "/api/providers/status-table",
+      "auth": "basic"
+    },
+    {
+      "group": "System",
+      "name": "Provider Router Status",
+      "method": "GET",
+      "path": "/api/provider-router/status",
+      "auth": "basic"
+    },
+    {
+      "group": "System",
+      "name": "Configured Providers",
+      "method": "GET",
+      "path": "/api/config/providers",
+      "auth": "basic"
+    },
+    {
+      "group": "Cards",
+      "name": "List Cards",
+      "method": "GET",
+      "path": "/api/cards",
+      "auth": "basic"
+    },
+    {
+      "group": "Cards",
+      "name": "Create Card Placeholder",
+      "method": "POST",
+      "path": "/api/cards",
+      "auth": "basic"
+    },
+    {
+      "group": "Cards",
+      "name": "Validate Card Input",
+      "method": "POST",
+      "path": "/api/cards/validate-input",
+      "auth": "basic"
+    },
+    {
+      "group": "Cards",
+      "name": "Provider Verification",
+      "method": "POST",
+      "path": "/api/cards/{{cardId}}/provider-verification",
+      "auth": "basic"
+    },
+    {
+      "group": "Cards",
+      "name": "Create Card Check",
+      "method": "POST",
+      "path": "/api/cards/{{cardId}}/checks",
+      "auth": "basic"
+    },
+    {
+      "group": "Cards",
+      "name": "Card Check History",
+      "method": "GET",
+      "path": "/api/cards/{{cardId}}/checks",
+      "auth": "basic"
+    },
+    {
+      "group": "Cards",
+      "name": "Card Enrollment",
+      "method": "GET",
+      "path": "/api/cards/{{cardId}}/enrollment",
+      "auth": "basic"
+    },
+    {
+      "group": "Cards",
+      "name": "Save Card Enrollment",
+      "method": "POST",
+      "path": "/api/cards/{{cardId}}/enrollment",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchecked / Checked Cards",
+      "name": "List Unchecked Cards",
+      "method": "GET",
+      "path": "/api/unchecked-cards",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchecked / Checked Cards",
+      "name": "Import Unchecked Card Placeholder",
+      "method": "POST",
+      "path": "/api/unchecked-cards",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchecked / Checked Cards",
+      "name": "Live Check Unchecked Card",
+      "method": "POST",
+      "path": "/api/unchecked-cards/{{uncheckedCardId}}/live-check",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchecked / Checked Cards",
+      "name": "Live Check Selected",
+      "method": "POST",
+      "path": "/api/unchecked-cards/live-check-selected",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchecked / Checked Cards",
+      "name": "Check Range",
+      "method": "POST",
+      "path": "/api/unchecked-cards/check-range",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchecked / Checked Cards",
+      "name": "List Checked Live Cards",
+      "method": "GET",
+      "path": "/api/checked-live-cards",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchecked / Checked Cards",
+      "name": "List Checked Cards",
+      "method": "GET",
+      "path": "/api/checked-cards",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchecked / Checked Cards",
+      "name": "Checked Card Action",
+      "method": "POST",
+      "path": "/api/checked-cards/{{checkedCardId}}/action",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchecked / Checked Cards",
+      "name": "Checked Live Card Action",
+      "method": "POST",
+      "path": "/api/checked-live-cards/{{checkedLiveCardId}}/action",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchecked / Checked Cards",
+      "name": "Checked Card Amazon Pay Action",
+      "method": "POST",
+      "path": "/api/checked-cards/{{checkedCardId}}/amazonpay/action",
+      "auth": "basic"
+    },
+    {
+      "group": "Checkers",
+      "name": "BIN Check",
+      "method": "POST",
+      "path": "/api/checkers/bincheck",
+      "auth": "basic"
+    },
+    {
+      "group": "Checkers",
+      "name": "Joker Check",
+      "method": "POST",
+      "path": "/api/checkers/joker",
+      "auth": "basic"
+    },
+    {
+      "group": "Checkers",
+      "name": "Live Check",
+      "method": "POST",
+      "path": "/api/checkers/livecheck",
+      "auth": "basic"
+    },
+    {
+      "group": "Checkers",
+      "name": "Live Checker Bulk",
+      "method": "POST",
+      "path": "/api/checkers/live-checker",
+      "auth": "basic"
+    },
+    {
+      "group": "Checkers",
+      "name": "Balance Check",
+      "method": "POST",
+      "path": "/api/checkers/balance",
+      "auth": "basic"
+    },
+    {
+      "group": "Payment Processors",
+      "name": "Operation Catalog",
+      "method": "GET",
+      "path": "/api/provider-operations/catalog",
+      "auth": "basic"
+    },
+    {
+      "group": "Payment Processors",
+      "name": "Processor Health",
+      "method": "GET",
+      "path": "/api/payment-processors/health",
+      "auth": "basic"
+    },
+    {
+      "group": "Payment Processors",
+      "name": "Run Processor Health Check",
+      "method": "POST",
+      "path": "/api/payment-processors/health/check",
+      "auth": "basic"
+    },
+    {
+      "group": "Payment Processors",
+      "name": "Processor Logs",
+      "method": "GET",
+      "path": "/api/payment-processors/logs?processor=&attemptType=&status=&limit=100",
+      "auth": "basic"
+    },
+    {
+      "group": "Payment Processors",
+      "name": "Generic Provider Operation",
+      "method": "POST",
+      "path": "/api/provider-operations/cards",
+      "auth": "basic"
+    },
+    {
+      "group": "Payment Processors",
+      "name": "Audit Logs",
+      "method": "GET",
+      "path": "/api/audit-logs",
+      "auth": "basic"
+    },
+    {
+      "group": "Payment Processors",
+      "name": "Provider Reports",
+      "method": "GET",
+      "path": "/api/provider-reports",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Test Connection",
+      "method": "GET",
+      "path": "/api/providers/clover/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Iframe Config",
+      "method": "GET",
+      "path": "/api/providers/clover/iframe-config",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Merchant",
+      "method": "GET",
+      "path": "/api/providers/clover/merchant",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Orders",
+      "method": "GET",
+      "path": "/api/providers/clover/orders",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Payments",
+      "method": "GET",
+      "path": "/api/providers/clover/payments",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Tokenize Card",
+      "method": "POST",
+      "path": "/api/providers/clover/cards/tokenize",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Preauth",
+      "method": "POST",
+      "path": "/api/providers/clover/preauth",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Verify With BIN",
+      "method": "POST",
+      "path": "/api/providers/clover/cards/verify-with-bin",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Iframe Verify",
+      "method": "POST",
+      "path": "/api/providers/clover/cards/iframe-verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Refund",
+      "method": "POST",
+      "path": "/api/providers/clover/refund",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Clover",
+      "name": "Tenders",
+      "method": "GET",
+      "path": "/api/providers/clover/tenders",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "REST Test",
+      "method": "GET",
+      "path": "/api/providers/paypal/rest/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "Manager Status",
+      "method": "GET",
+      "path": "/api/providers/paypal/manager/status",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "Manager Test",
+      "method": "POST",
+      "path": "/api/providers/paypal/manager/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "NVP Test",
+      "method": "POST",
+      "path": "/api/providers/paypal/nvp/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "Sandbox Card Authorize",
+      "method": "POST",
+      "path": "/api/providers/paypal/sandbox/orders/card-authorize",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "Manager Inquiry",
+      "method": "POST",
+      "path": "/api/providers/paypal/manager/inquiry",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "Manager Live Check",
+      "method": "POST",
+      "path": "/api/providers/paypal/manager/cards/live-check",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "Manager BIN Check",
+      "method": "POST",
+      "path": "/api/providers/paypal/manager/cards/bin-check",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "Direct Payment Sale",
+      "method": "POST",
+      "path": "/api/providers/paypal/direct-payment/cards/sale",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "Manager Auth",
+      "method": "POST",
+      "path": "/api/providers/paypal/manager/cards/auth",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "Manager Capture",
+      "method": "POST",
+      "path": "/api/providers/paypal/manager/cards/capture",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - PayPal",
+      "name": "Direct Payment Void",
+      "method": "POST",
+      "path": "/api/providers/paypal/direct-payment/cards/void",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Braintree / Unified",
+      "name": "Client Token",
+      "method": "GET",
+      "path": "/api/providers/braintree/client-token",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Braintree / Unified",
+      "name": "Drop-in Checkout",
+      "method": "POST",
+      "path": "/api/providers/braintree/dropin/checkout",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Braintree / Unified",
+      "name": "Unified Single Token Auth + Void",
+      "method": "POST",
+      "path": "/api/unified-processor/payment-methods/verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Braintree / Unified",
+      "name": "Unified Batch Token Auth + Void",
+      "method": "POST",
+      "path": "/api/unified-processor/payment-methods/verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "fluidpay Status",
+      "method": "GET",
+      "path": "/api/providers/fluidpay/status",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "fluidpay Test",
+      "method": "POST",
+      "path": "/api/providers/fluidpay/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "fluidpay Sale",
+      "method": "POST",
+      "path": "/api/providers/fluidpay/cards/sale",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "fluidpay Auth",
+      "method": "POST",
+      "path": "/api/providers/fluidpay/cards/auth",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "fluidpay Verify",
+      "method": "POST",
+      "path": "/api/providers/fluidpay/cards/verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "fluidpay Capture",
+      "method": "POST",
+      "path": "/api/providers/fluidpay/cards/capture",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "fluidpay Refund",
+      "method": "POST",
+      "path": "/api/providers/fluidpay/cards/refund",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "fluidpay Void",
+      "method": "POST",
+      "path": "/api/providers/fluidpay/cards/void",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "fluidpay Transaction Detail",
+      "method": "GET",
+      "path": "/api/providers/fluidpay/transactions/{{transactionId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "globalpayments Status",
+      "method": "GET",
+      "path": "/api/providers/globalpayments/status",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "globalpayments Test",
+      "method": "POST",
+      "path": "/api/providers/globalpayments/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "globalpayments Sale",
+      "method": "POST",
+      "path": "/api/providers/globalpayments/cards/sale",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "globalpayments Auth",
+      "method": "POST",
+      "path": "/api/providers/globalpayments/cards/auth",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "globalpayments Verify",
+      "method": "POST",
+      "path": "/api/providers/globalpayments/cards/verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "globalpayments Capture",
+      "method": "POST",
+      "path": "/api/providers/globalpayments/cards/capture",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "globalpayments Refund",
+      "method": "POST",
+      "path": "/api/providers/globalpayments/cards/refund",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "globalpayments Void",
+      "method": "POST",
+      "path": "/api/providers/globalpayments/cards/void",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "globalpayments Transaction Detail",
+      "method": "GET",
+      "path": "/api/providers/globalpayments/transactions/{{transactionId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "nmi Status",
+      "method": "GET",
+      "path": "/api/providers/nmi/status",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "nmi Test",
+      "method": "POST",
+      "path": "/api/providers/nmi/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "nmi Sale",
+      "method": "POST",
+      "path": "/api/providers/nmi/cards/sale",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "nmi Auth",
+      "method": "POST",
+      "path": "/api/providers/nmi/cards/auth",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "nmi Verify",
+      "method": "POST",
+      "path": "/api/providers/nmi/cards/verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "nmi Capture",
+      "method": "POST",
+      "path": "/api/providers/nmi/cards/capture",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "nmi Refund",
+      "method": "POST",
+      "path": "/api/providers/nmi/cards/refund",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "nmi Void",
+      "method": "POST",
+      "path": "/api/providers/nmi/cards/void",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "nmi Transaction Detail",
+      "method": "GET",
+      "path": "/api/providers/nmi/transactions/{{transactionId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "zoho Status",
+      "method": "GET",
+      "path": "/api/providers/zoho/status",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "zoho Test",
+      "method": "POST",
+      "path": "/api/providers/zoho/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "zoho Sale",
+      "method": "POST",
+      "path": "/api/providers/zoho/cards/sale",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "zoho Auth",
+      "method": "POST",
+      "path": "/api/providers/zoho/cards/auth",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "zoho Verify",
+      "method": "POST",
+      "path": "/api/providers/zoho/cards/verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "zoho Capture",
+      "method": "POST",
+      "path": "/api/providers/zoho/cards/capture",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "zoho Refund",
+      "method": "POST",
+      "path": "/api/providers/zoho/cards/refund",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "zoho Void",
+      "method": "POST",
+      "path": "/api/providers/zoho/cards/void",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Generic Card Gateways",
+      "name": "zoho Transaction Detail",
+      "method": "GET",
+      "path": "/api/providers/zoho/transactions/{{transactionId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Status",
+      "method": "GET",
+      "path": "/api/providers/amazonpay/status",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Legacy Widget Config",
+      "method": "GET",
+      "path": "/api/providers/amazonpay/legacy-widget-config",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Test",
+      "method": "POST",
+      "path": "/api/providers/amazonpay/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Create Checkout Session",
+      "method": "POST",
+      "path": "/api/providers/amazonpay/checkout-sessions",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Complete Checkout Session",
+      "method": "POST",
+      "path": "/api/providers/amazonpay/checkout-sessions/{{checkoutSessionId}}/complete",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Authorize",
+      "method": "POST",
+      "path": "/api/providers/amazonpay/cards/auth",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Sale",
+      "method": "POST",
+      "path": "/api/providers/amazonpay/cards/sale",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Verify",
+      "method": "POST",
+      "path": "/api/providers/amazonpay/cards/verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Capture",
+      "method": "POST",
+      "path": "/api/providers/amazonpay/cards/capture",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Refund",
+      "method": "POST",
+      "path": "/api/providers/amazonpay/cards/refund",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Void",
+      "method": "POST",
+      "path": "/api/providers/amazonpay/cards/void",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Charge Permission Detail",
+      "method": "GET",
+      "path": "/api/providers/amazonpay/charge-permissions/{{chargePermissionId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Update Charge Permission",
+      "method": "PATCH",
+      "path": "/api/providers/amazonpay/charge-permissions/{{chargePermissionId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Close Charge Permission",
+      "method": "DELETE",
+      "path": "/api/providers/amazonpay/charge-permissions/{{chargePermissionId}}/close",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Amazon Pay",
+      "name": "Transaction Detail",
+      "method": "GET",
+      "path": "/api/providers/amazonpay/transactions/{{transactionId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "Quiklie Status",
+      "method": "GET",
+      "path": "/api/providers/quiklie/status",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "Quiklie Test",
+      "method": "POST",
+      "path": "/api/providers/quiklie/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "Quiklie Sale",
+      "method": "POST",
+      "path": "/api/providers/quiklie/cards/sale",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "Quiklie Auth",
+      "method": "POST",
+      "path": "/api/providers/quiklie/cards/auth",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "Quiklie Verify",
+      "method": "POST",
+      "path": "/api/providers/quiklie/cards/verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "Quiklie OTP Verify",
+      "method": "POST",
+      "path": "/api/providers/quiklie/otp/verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "Quiklie Transaction Detail",
+      "method": "GET",
+      "path": "/api/providers/quiklie/transactions/{{transactionId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "PropelrPay Status",
+      "method": "GET",
+      "path": "/api/providers/propelrpay/status",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "PropelrPay Test",
+      "method": "POST",
+      "path": "/api/providers/propelrpay/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "PropelrPay Amount Sequence",
+      "method": "POST",
+      "path": "/api/providers/propelrpay/amount-sequence",
+      "auth": "basic"
+    },
+    {
+      "group": "Provider - Quiklie / PropelrPay",
+      "name": "PropelrPay Transaction Detail",
+      "method": "GET",
+      "path": "/api/providers/propelrpay/transactions/{{transactionId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Voice Token",
+      "method": "GET",
+      "path": "/api/voice/token",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Twilio Provider Test",
+      "method": "GET",
+      "path": "/api/providers/twilio/test",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Add Number",
+      "method": "POST",
+      "path": "/api/numbers/add",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Verify Number",
+      "method": "POST",
+      "path": "/api/numbers/verify",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Start Twilio Verification",
+      "method": "POST",
+      "path": "/api/numbers/{{numberId}}/twilio/start",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Check Twilio Verification",
+      "method": "POST",
+      "path": "/api/numbers/{{numberId}}/twilio/check",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Numbers For Card",
+      "method": "GET",
+      "path": "/api/numbers/card/{{cardId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "All Numbers",
+      "method": "GET",
+      "path": "/api/numbers/all",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Create Mask",
+      "method": "POST",
+      "path": "/api/masks/create",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Resolve Mask",
+      "method": "POST",
+      "path": "/api/masks/resolve",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Initiate Call",
+      "method": "POST",
+      "path": "/api/calls/initiate",
+      "auth": "basic"
+    },
+    {
+      "group": "Voice / Number / Masking",
+      "name": "Initiate Card Call",
+      "method": "POST",
+      "path": "/api/calls/card",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Summary",
+      "method": "GET",
+      "path": "/api/debt-management/summary",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Funding Accounts",
+      "method": "GET",
+      "path": "/api/debt-management/funding-accounts",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Create Funding Account",
+      "method": "POST",
+      "path": "/api/debt-management/funding-accounts",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Funding Account Detail",
+      "method": "GET",
+      "path": "/api/debt-management/funding-accounts/{{accountId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Funding Account Payments",
+      "method": "GET",
+      "path": "/api/debt-management/funding-accounts/{{accountId}}/payments",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Debt Cards",
+      "method": "GET",
+      "path": "/api/debt-management/cards",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Create Debt Card",
+      "method": "POST",
+      "path": "/api/debt-management/cards",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Debt Card Detail",
+      "method": "GET",
+      "path": "/api/debt-management/cards/{{cardId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Debt Card Payments",
+      "method": "GET",
+      "path": "/api/debt-management/cards/{{cardId}}/payments",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Payments",
+      "method": "GET",
+      "path": "/api/debt-management/payments",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Create Payment",
+      "method": "POST",
+      "path": "/api/debt-management/payments",
+      "auth": "basic"
+    },
+    {
+      "group": "Debt Management",
+      "name": "Update Payment",
+      "method": "PATCH",
+      "path": "/api/debt-management/payments/{{paymentId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Users",
+      "name": "List Users",
+      "method": "GET",
+      "path": "/api/users",
+      "auth": "basic"
+    },
+    {
+      "group": "Users",
+      "name": "Create User",
+      "method": "POST",
+      "path": "/api/users",
+      "auth": "basic"
+    },
+    {
+      "group": "Users",
+      "name": "Update User",
+      "method": "PATCH",
+      "path": "/api/users/{{userId}}",
+      "auth": "basic"
+    },
+    {
+      "group": "Users",
+      "name": "Set User Password",
+      "method": "POST",
+      "path": "/api/users/{{userId}}/password",
+      "auth": "basic"
+    },
+    {
+      "group": "Security / Burp Suite",
+      "name": "Status",
+      "method": "GET",
+      "path": "/api/security/burp-suite/status",
+      "auth": "basic"
+    },
+    {
+      "group": "Security / Burp Suite",
+      "name": "Start",
+      "method": "POST",
+      "path": "/api/security/burp-suite/start",
+      "auth": "basic"
+    },
+    {
+      "group": "Security / Burp Suite",
+      "name": "Stop",
+      "method": "POST",
+      "path": "/api/security/burp-suite/stop",
+      "auth": "basic"
+    },
+    {
+      "group": "Security / Burp Suite",
+      "name": "Arm OTP",
+      "method": "POST",
+      "path": "/api/security/burp-suite/otp/arm",
+      "auth": "basic"
+    },
+    {
+      "group": "Security / Burp Suite",
+      "name": "Send OTP",
+      "method": "POST",
+      "path": "/api/security/burp-suite/otp/send",
+      "auth": "basic"
+    },
+    {
+      "group": "Security / Burp Suite",
+      "name": "OTP Inbox Webhook",
+      "method": "POST",
+      "path": "/api/security/burp-suite/otp/inbox",
+      "auth": "noauth"
+    },
+    {
+      "group": "Security / Burp Suite",
+      "name": "OTP Messages",
+      "method": "GET",
+      "path": "/api/security/burp-suite/otp/messages",
+      "auth": "basic"
+    },
+    {
+      "group": "Security / Burp Suite",
+      "name": "Traffic",
+      "method": "GET",
+      "path": "/api/security/burp-suite/traffic",
+      "auth": "basic"
+    },
+    {
+      "group": "Security / Burp Suite",
+      "name": "Pending",
+      "method": "GET",
+      "path": "/api/security/burp-suite/pending",
+      "auth": "basic"
+    },
+    {
+      "group": "Security / Burp Suite",
+      "name": "Resolve Pending",
+      "method": "POST",
+      "path": "/api/security/burp-suite/pending/{{pendingId}}/resolve",
+      "auth": "basic"
+    },
+    {
+      "group": "Ollama / AI",
+      "name": "Tags",
+      "method": "GET",
+      "path": "/api/ollama/tags",
+      "auth": "basic"
+    },
+    {
+      "group": "Ollama / AI",
+      "name": "Status",
+      "method": "GET",
+      "path": "/api/ollama/status",
+      "auth": "basic"
+    },
+    {
+      "group": "Ollama / AI",
+      "name": "Chat",
+      "method": "POST",
+      "path": "/api/ollama/chat",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchargeback",
+      "name": "List Cases",
+      "method": "GET",
+      "path": "/api/unchargeback/cases",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchargeback",
+      "name": "Create Case",
+      "method": "POST",
+      "path": "/api/unchargeback/cases",
+      "auth": "basic"
+    },
+    {
+      "group": "Unchargeback",
+      "name": "Case Action",
+      "method": "POST",
+      "path": "/api/unchargeback/cases/{{caseId}}/evidence",
+      "auth": "basic"
+    }
+  ]
+}

