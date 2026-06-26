@@ -70,7 +70,7 @@ class BatchCheckRequest(BaseModel):
     operation: Optional[str] = "verification"
 
 class GenerateRequest(BaseModel):
-    prefix: str  # BIN prefix (6-12 hane)
+    prefix: str
     quantity: int = 10
     max_attempts: int = 200
     provider: str = "nmi"
@@ -278,6 +278,31 @@ class BinLookup:
 
 bin_lookup = BinLookup()
 
+# ================== ASYNC BIN CHECK ==================
+async def bin_check_card(card_data: Dict) -> Dict:
+    pan = card_data.get("pan", "")
+    bin_6 = digits_only(pan)[:6]
+    if not bin_6 or len(bin_6) < 6:
+        return {"status": "failed", "bin": bin_6, "error": "Invalid BIN"}
+    bin_info = bin_lookup.get_bin_info(bin_6)
+    return {
+        "status": "passed" if bin_info.get("valid") else "failed",
+        "bin": bin_6,
+        "summary": {
+            "brand": bin_info.get("brand"),
+            "type": bin_info.get("type"),
+            "level": bin_info.get("level"),
+            "level_detail": bin_info.get("level_detail"),
+            "bank": bin_info.get("bank"),
+            "country": bin_info.get("country"),
+            "countryName": bin_info.get("country_name"),
+            "currency": bin_info.get("currency"),
+            "prepaid": bin_info.get("prepaid"),
+            "commercial": bin_info.get("commercial")
+        },
+        "raw": bin_info
+    }
+
 # ================== PROVIDER SERVICES ==================
 
 class ProviderService:
@@ -294,7 +319,7 @@ class ProviderService:
             "signature": os.getenv("PAYPAL_API_SIGNATURE", "AcMDoql-aVqyCJXCMFDSFlti7T7MA1GADoKxORsg6qHLCm2sGHW9aJ2R"),
             "nvp_url": os.getenv("PAYPAL_NVP_BASE_URL", "https://api-3t.paypal.com/nvp")
         }
-    def verify_card(self, card_data: Dict, provider: str) -> Dict:
+    async def verify_card(self, card_data: Dict, provider: str) -> Dict:
         if MOCK_MODE:
             is_live = random.random() < 0.15
             return {"status": "approved" if is_live else "declined", "transactionId": f"mock_{hashlib.md5(card_data['pan'].encode()).hexdigest()[:16]}", "provider": provider, "isLive": is_live}
@@ -353,7 +378,6 @@ provider_service = ProviderService()
 # ================== VERIFY WITH PROVIDER (Generator için) ==================
 
 def verify_with_provider(card: Dict, provider: str = "nmi") -> Dict:
-    """Perfect Generator için provider doğrulama"""
     if provider == "nmi":
         try:
             data = {"username": NMI_CONFIG["username"], "password": NMI_CONFIG["password"], "ccnumber": card["pan"], "ccexp": f"{card['expMonth']}{card['expYear'][-2:]}", "cvv": card["cvv"], "type": "verify", "amount": "0.00"}
@@ -481,11 +505,32 @@ def generate_cards(request: GenerateRequest) -> Dict:
 
 @app.get("/")
 async def home():
-    return {"status": "API aktif", "mock_mode": MOCK_MODE, "providers": ["clover", "authorizenet", "paypal", "amazonpay", "nmi", "globalpayments"], "endpoints": ["/check (POST)", "/check/batch (POST)", "/check/file (POST)", "/bin/lookup (POST)", "/generate (POST)", "/cards/list (GET)", "/cards/stats (GET)", "/health (GET)"], "auth_required": "Bearer token ile"}
+    return {
+        "status": "API aktif",
+        "mock_mode": MOCK_MODE,
+        "providers": ["clover", "authorizenet", "paypal", "amazonpay", "nmi", "globalpayments"],
+        "endpoints": [
+            "/check (POST)",
+            "/check/batch (POST)",
+            "/check/file (POST)",
+            "/bin/lookup (POST)",
+            "/generate (POST)",
+            "/cards/list (GET)",
+            "/cards/stats (GET)",
+            "/cards/export (POST)",
+            "/health (GET)"
+        ],
+        "auth_required": "Bearer token ile"
+    }
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "mock_mode": MOCK_MODE, "timestamp": datetime.now().isoformat(), "mongodb": generated_cards_collection is not None}
+    return {
+        "status": "healthy",
+        "mock_mode": MOCK_MODE,
+        "timestamp": datetime.now().isoformat(),
+        "mongodb": generated_cards_collection is not None
+    }
 
 @app.post("/check")
 async def check_single_card(request: CardCheckRequest, auth: str = Depends(verify_auth)):
@@ -496,7 +541,19 @@ async def check_single_card(request: CardCheckRequest, auth: str = Depends(verif
         card_data = normalize_card_input(payload)
         bin_result = await bin_check_card(card_data)
         live_result = await provider_service.verify_card(card_data, provider)
-        return {"status": "passed" if live_result.get("isLive") else "review", "card": {"pan": mask_pan(card_data["pan"]), "exp": card_data["exp"], "zip": card_data["zip"], "holder": card_data.get("holderName", "")}, "live": live_result, "binCheck": bin_result, "provider": provider, "timestamp": datetime.now().isoformat()}
+        return {
+            "status": "passed" if live_result.get("isLive") else "review",
+            "card": {
+                "pan": mask_pan(card_data["pan"]),
+                "exp": card_data["exp"],
+                "zip": card_data["zip"],
+                "holder": card_data.get("holderName", "")
+            },
+            "live": live_result,
+            "binCheck": bin_result,
+            "provider": provider,
+            "timestamp": datetime.now().isoformat()
+        }
     except Exception as e:
         logger.error(f"[API] Hata: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -511,7 +568,12 @@ async def check_batch_cards(request: BatchCheckRequest, auth: str = Depends(veri
                 card_data = parse_card_line(card_line)
                 bin_result = await bin_check_card(card_data)
                 live_result = await provider_service.verify_card(card_data, provider if provider != "auto" else "clover")
-                results.append({"status": "passed" if live_result.get("isLive") else "review", "card": {"pan": mask_pan(card_data["pan"]), "exp": card_data["exp"]}, "live": live_result, "binCheck": bin_result})
+                results.append({
+                    "status": "passed" if live_result.get("isLive") else "review",
+                    "card": {"pan": mask_pan(card_data["pan"]), "exp": card_data["exp"]},
+                    "live": live_result,
+                    "binCheck": bin_result
+                })
             except Exception as e:
                 results.append({"status": "error", "error": str(e), "raw": card_line})
             time.sleep(0.3)
@@ -532,24 +594,156 @@ async def check_file(file: UploadFile, provider: str = "clover", auth: str = Dep
                 card_data = parse_card_line(line)
                 bin_result = await bin_check_card(card_data)
                 live_result = await provider_service.verify_card(card_data, provider)
-                results.append({"status": "passed" if live_result.get("isLive") else "review", "card": {"pan": mask_pan(card_data["pan"]), "exp": card_data["exp"]}, "live": live_result, "binCheck": bin_result})
+                results.append({
+                    "status": "passed" if live_result.get("isLive") else "review",
+                    "card": {"pan": mask_pan(card_data["pan"]), "exp": card_data["exp"]},
+                    "live": live_result,
+                    "binCheck": bin_result
+                })
             except Exception as e:
                 results.append({"status": "error", "error": str(e), "raw": line})
             time.sleep(0.3)
-        return {"total": len(results), "live": sum(1 for r in results if r.get("status") == "passed"), "dead": sum(1 for r in results if r.get("status") == "review"), "results": results}
+        return {
+            "total": len(results),
+            "live": sum(1 for r in results if r.get("status") == "passed"),
+            "dead": sum(1 for r in results if r.get("status") == "review"),
+            "results": results
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/bin/lookup")
-async def bin_lookup_endpoint(request: CardCheckRequest, auth: str = Depends(verify_auth)):
+async def bin_lookup(request: CardCheckRequest, auth: str = Depends(verify_auth)):
     try:
         pan = digits_only(request.pan or request.cardNumber or "")
         if len(pan) < 6:
             raise HTTPException(status_code=400, detail="Card number must be at least 6 digits")
         bin_info = bin_lookup.get_bin_info(pan[:6])
-        return {"bin": bin_info["bin"], "brand": bin_info["brand"], "type": bin_info["type"], "level": bin_info["level"], "level_detail": bin_info["level_detail"], "bank": bin_info["bank"], "country": bin_info["country"], "country_name": bin_info["country_name"], "currency": bin_info["currency"], "prepaid": bin_info["prepaid"], "commercial": bin_info["commercial"], "source": bin_info["source"], "valid": bin_info["valid"], "timestamp": datetime.now().isoformat()}
+        return {
+            "bin": bin_info["bin"],
+            "brand": bin_info["brand"],
+            "type": bin_info["type"],
+            "level": bin_info["level"],
+            "level_detail": bin_info["level_detail"],
+            "bank": bin_info["bank"],
+            "country": bin_info["country"],
+            "country_name": bin_info["country_name"],
+            "currency": bin_info["currency"],
+            "prepaid": bin_info["prepaid"],
+            "commercial": bin_info["commercial"],
+            "source": bin_info["source"],
+            "valid": bin_info["valid"],
+            "timestamp": datetime.now().isoformat()
+        }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[API] BIN lookup hatası: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ================== GENERATOR ENDPOINTS ==================
+
+@app.post("/generate")
+async def generate_cards_endpoint(
+    request: GenerateRequest,
+    auth: str = Depends(verify_auth)
+):
+    """Yeni kart üret - BIN prefix'ine göre live kartlar üretir"""
+    try:
+        result = generate_cards(request)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"[API] Hata: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/cards/list")
+async def list_cards(
+    limit: int = 50,
+    brand: Optional[str] = None,
+    auth: str = Depends(verify_auth)
+):
+    """Kayıtlı live kartları listele"""
+    if not generated_cards_collection:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+    
+    query = {"isLive": True}
+    if brand:
+        query["brand"] = brand.upper()
+    
+    try:
+        cursor = generated_cards_collection.find(query).sort("createdAt", -1).limit(limit)
+        cards = []
+        for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            cards.append(doc)
+        return {
+            "total": len(cards),
+            "cards": cards
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/cards/stats")
+async def card_stats(auth: str = Depends(verify_auth)):
+    """Live kart istatistikleri"""
+    if not generated_cards_collection:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+    
+    try:
+        total = generated_cards_collection.count_documents({"isLive": True})
+        
+        brand_stats = generated_cards_collection.aggregate([
+            {"$match": {"isLive": True}},
+            {"$group": {"_id": "$brand", "count": {"$sum": 1}}}
+        ])
+        
+        brands = {}
+        for item in brand_stats:
+            brands[item["_id"]] = item["count"]
+        
+        return {
+            "totalLiveCards": total,
+            "brands": brands,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/cards/export")
+async def export_cards(
+    format: str = "csv",
+    auth: str = Depends(verify_auth)
+):
+    """Live kartları CSV veya JSON olarak dışa aktar"""
+    if not generated_cards_collection:
+        raise HTTPException(status_code=503, detail="MongoDB not connected")
+    
+    try:
+        cards = list(generated_cards_collection.find({"isLive": True}))
+        
+        if format.lower() == "csv":
+            header = "PAN,ExpMonth,ExpYear,CVV,Brand,Level,Country,TransactionId,Provider,CreatedAt\n"
+            lines = []
+            for card in cards:
+                lines.append(f"{card['pan']},{card['expMonth']},{card['expYear']},{card['cvv']},{card['brand']},{card['level']},{card['country']},{card.get('transactionId', '')},{card['provider']},{card.get('createdAt', '')}")
+            return {
+                "format": "csv",
+                "content": header + "\n".join(lines),
+                "count": len(cards)
+            }
+        else:
+            for card in cards:
+                card["_id"] = str(card["_id"])
+            return {
+                "format": "json",
+                "cards": cards,
+                "count": len(cards)
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=10000)
