@@ -72,6 +72,7 @@ except Exception as e:
 # ================== MODELS ==================
 class CardCheckRequest(BaseModel):
     """Kart doğrulama isteği"""
+    bin: Optional[str] = Field(None, description="BIN/IIN veya kart numarasının ilk 6 hanesi", example="451401")
     pan: Optional[str] = Field(None, description="Kart numarası", example="4514011614153896")
     cardNumber: Optional[str] = Field(None, description="Kart numarası (alternatif)", example="4514011614153896")
     exp: Optional[str] = Field(None, description="Son kullanma tarihi (MM/YYYY)", example="07/2026")
@@ -214,7 +215,55 @@ def parse_card_line(line: str) -> Optional[Dict]:
 class BinLookup:
     def __init__(self):
         self.cache = {}
-        self.binlist_url = "https://lookup.binlist.net/"
+        self.csv_path = Path(__file__).resolve().parent / "bin-data.csv"
+        self.csv_index = None
+        self.csv_mtime = None
+
+    def _load_csv_index(self) -> Dict[str, Dict]:
+        if not self.csv_path.exists():
+            raise FileNotFoundError(f"BIN data file not found: {self.csv_path}")
+
+        mtime = self.csv_path.stat().st_mtime
+        if self.csv_index is not None and self.csv_mtime == mtime:
+            return self.csv_index
+
+        index = {}
+        with self.csv_path.open("r", encoding="utf-8-sig", newline="") as csv_file:
+            reader = csv.DictReader(csv_file)
+            for row in reader:
+                bin_value = digits_only(row.get("BIN"))[:6]
+                if len(bin_value) == 6 and bin_value not in index:
+                    index[bin_value] = row
+
+        self.csv_index = index
+        self.csv_mtime = mtime
+        logger.info(f"[BIN] {len(index)} BIN kaydı bin-data.csv dosyasından yüklendi")
+        return index
+
+    def _row_to_result(self, bin_6: str, row: Dict) -> Dict:
+        category = str(row.get("Category") or "").strip().upper()
+        card_type = str(row.get("Type") or "").strip().upper() or "UNKNOWN"
+        brand = str(row.get("Brand") or "").strip().upper() or "UNKNOWN"
+        issuer = str(row.get("Issuer") or "").strip() or "Unknown"
+        country = str(row.get("isoCode2") or "").strip().upper() or "XX"
+        country_name = str(row.get("CountryName") or "").strip() or "Unknown"
+        level = category or "STANDARD"
+
+        return {
+            "bin": bin_6,
+            "brand": brand,
+            "type": card_type,
+            "level": level,
+            "bank": issuer,
+            "issuer_phone": str(row.get("IssuerPhone") or "").strip(),
+            "issuer_url": str(row.get("IssuerUrl") or "").strip(),
+            "country": country,
+            "country_name": country_name,
+            "country_alpha3": str(row.get("isoCode3") or "").strip().upper(),
+            "currency": "USD",
+            "valid": True,
+            "source": "bin-data.csv"
+        }
     
     def get_bin_info(self, bin_number: str) -> Dict:
         bin_6 = digits_only(bin_number)[:6]
@@ -230,41 +279,14 @@ class BinLookup:
             "country": "XX",
             "country_name": "Unknown",
             "currency": "USD",
-            "valid": False
+            "valid": False,
+            "source": "bin-data.csv"
         }
         
         try:
-            r = requests.get(f"{self.binlist_url}{bin_6}", timeout=10, headers={"Accept-Version": "3"})
-            if r.status_code == 200:
-                data = r.json()
-                bank = data.get("bank", {})
-                country = data.get("country", {})
-                brand = data.get("scheme", "UNKNOWN").upper()
-                brand_name = data.get("brand", "").upper()
-                card_type = data.get("type", "UNKNOWN").upper()
-                
-                level = "STANDARD"
-                if "PLATINUM" in brand_name:
-                    level = "PLATINUM"
-                elif "GOLD" in brand_name:
-                    level = "GOLD"
-                elif "SIGNATURE" in brand_name:
-                    level = "SIGNATURE"
-                elif "INFINITE" in brand_name:
-                    level = "INFINITE"
-                elif "WORLD" in brand_name:
-                    level = "WORLD"
-                
-                result.update({
-                    "brand": brand,
-                    "type": card_type,
-                    "level": level,
-                    "bank": bank.get("name", "Unknown"),
-                    "country": country.get("alpha2", "XX"),
-                    "country_name": country.get("name", "Unknown"),
-                    "currency": country.get("currency", "USD"),
-                    "valid": True
-                })
+            row = self._load_csv_index().get(bin_6)
+            if row:
+                result.update(self._row_to_result(bin_6, row))
         except Exception as e:
             logger.warning(f"[BIN] Hata: {e}")
         
@@ -607,10 +629,14 @@ async def lookup_bin(
             "type": bin_info["type"],
             "level": bin_info["level"],
             "bank": bin_info["bank"],
+            "issuer_phone": bin_info.get("issuer_phone", ""),
+            "issuer_url": bin_info.get("issuer_url", ""),
             "country": bin_info["country"],
             "country_name": bin_info["country_name"],
+            "country_alpha3": bin_info.get("country_alpha3", ""),
             "currency": bin_info["currency"],
             "valid": bin_info["valid"],
+            "source": bin_info.get("source", "bin-data.csv"),
             "timestamp": datetime.now().isoformat()
         }
     except HTTPException:
@@ -618,6 +644,18 @@ async def lookup_bin(
     except Exception as e:
         logger.error(f"[API] BIN lookup hatası: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/api/checkers/bincheck",
+    tags=["BIN Lookup"],
+    summary="BIN check",
+    description="bin-data.csv dosyasından BIN bilgilerini getirir."
+)
+async def api_bincheck(
+    request: CardCheckRequest,
+    auth: str = Depends(verify_auth)
+):
+    return await lookup_bin(request, auth)
 
 @app.get(
     "/cards/live",
