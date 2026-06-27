@@ -90,11 +90,13 @@ class BatchCardRequest(BaseModel):
     cards: List[CardCheckRequest] = Field(..., description="Kart listesi (max 20)", max_items=20)
 
 class CardCheckResponse(BaseModel):
-    status: str = Field(..., description="Durum: live / dead / error")
+    status: str = Field(..., description="HTTP durumu: success / error")
+    verified: bool = Field(False, description="Kart başarıyla doğrulandı mı?")
+    isLive: bool = Field(False, description="Kart live mı? (verified=true ise)")
     message: str = Field(..., description="Sonuç mesajı")
     card: Dict = Field(..., description="Kart bilgileri")
     binInfo: Optional[Dict] = Field(None, description="BIN bilgileri")
-    verification: Optional[Dict] = Field(None, description="Doğrulama sonucu")
+    verification: Optional[Dict] = Field(None, description="Doğrulama detayları")
     dbSaved: bool = Field(False, description="Veritabanına kaydedildi mi?")
     timestamp: str = Field(..., description="İşlem zamanı")
 
@@ -115,11 +117,11 @@ CLOVER_CONFIG = {
 }
 
 MOCK_MODE = os.getenv("MOCK_MODE", "true").lower() in ["1", "true", "yes", "on"]
-BATCH_DELAY = float(os.getenv("BATCH_DELAY", "2.0"))  # 2 saniye delay
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))  # Maksimum batch boyutu
+BATCH_DELAY = float(os.getenv("BATCH_DELAY", "2.0"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))
 
 # Rate limiting için semaphore
-RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))  # Saniyede maksimum istek
+RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))
 semaphore = asyncio.Semaphore(RATE_LIMIT)
 
 # ================== HELPER FUNCTIONS ==================
@@ -453,6 +455,8 @@ def check_card_single(request: CardCheckRequest) -> CardCheckResponse:
     if not parsed:
         return CardCheckResponse(
             status="error",
+            verified=False,
+            isLive=False,
             message="Geçersiz kart formatı",
             card={"input": request.card or request.pan or "invalid"},
             binInfo=None,
@@ -489,15 +493,25 @@ def check_card_single(request: CardCheckRequest) -> CardCheckResponse:
         "holderName": request.holderName or ""
     }
     
+    # Clover ile doğrula
     verification = clover_verify_card(card_data)
-    is_live = verification.get("isLive", False)
     
-    if is_live:
+    # verification'dan bilgileri al
+    is_live = verification.get("isLive", False)
+    verification_status = verification.get("status", "unknown")
+    
+    # Kart doğrulandı mı? (status approved/succeeded/authorized ise)
+    is_verified = verification_status in ["approved", "succeeded", "authorized"] or is_live
+    
+    # Eğer live ise BIN ve DB işlemleri
+    if is_live and is_verified:
         bin_info = bin_lookup.get_bin_info(pan)
         save_result = save_to_mongodb(card_data, bin_info, verification)
         
         return CardCheckResponse(
-            status="live",
+            status="success",
+            verified=True,
+            isLive=True,
             message="Kart doğrulandı ve live olarak kaydedildi",
             card=card_response,
             binInfo=bin_info,
@@ -506,9 +520,27 @@ def check_card_single(request: CardCheckRequest) -> CardCheckResponse:
             timestamp=datetime.now().isoformat()
         )
     
+    # Dead veya Error durumu
     error_msg = verification.get('error', 'Doğrulama başarısız')
+    
+    if verification_status == "error":
+        return CardCheckResponse(
+            status="error",
+            verified=False,
+            isLive=False,
+            message=f"Doğrulama hatası: {error_msg}",
+            card=card_response,
+            binInfo=None,
+            verification=verification,
+            dbSaved=False,
+            timestamp=datetime.now().isoformat()
+        )
+    
+    # Dead kart
     return CardCheckResponse(
-        status="dead",
+        status="success",
+        verified=False,
+        isLive=False,
         message=f"Kart geçersiz: {error_msg}",
         card=card_response,
         binInfo=None,
@@ -522,9 +554,7 @@ def check_card_single(request: CardCheckRequest) -> CardCheckResponse:
 async def check_card_async(request: CardCheckRequest, index: int) -> tuple:
     """Asenkron kart kontrolü"""
     try:
-        # Rate limiting
         async with semaphore:
-            # Thread pool ile senkron fonksiyonu çalıştır
             loop = asyncio.get_event_loop()
             with ThreadPoolExecutor() as pool:
                 result = await loop.run_in_executor(pool, check_card_single, request)
@@ -533,6 +563,8 @@ async def check_card_async(request: CardCheckRequest, index: int) -> tuple:
         logger.error(f"Kart kontrol hatası (index {index}): {e}")
         error_response = CardCheckResponse(
             status="error",
+            verified=False,
+            isLive=False,
             message=f"Kontrol hatası: {str(e)}",
             card={"error": str(e)},
             binInfo=None,
@@ -548,22 +580,23 @@ async def process_batch(cards: List[CardCheckRequest]) -> List[CardCheckResponse
     
     for i, card in enumerate(cards):
         try:
-            # 2 saniye delay (ilk kart için bekleme yok)
             if i > 0:
-                logger.info(f"Batch işlemi: {i}. kart için 2 saniye bekleniyor...")
+                logger.info(f"Batch işlemi: {i}. kart için {BATCH_DELAY} saniye bekleniyor...")
                 await asyncio.sleep(BATCH_DELAY)
             
-            # Kartı kontrol et
             logger.info(f"Batch işlemi: {i+1}/{len(cards)}. kart kontrol ediliyor...")
             index, result = await check_card_async(card, i)
             results[index] = result
             
-            logger.info(f"Batch işlemi: {i+1}/{len(cards)}. kart tamamlandı. Status: {result.status}")
+            status_text = "LIVE ✅" if result.isLive else "DEAD ❌" if result.verified == False else "ERROR ⚠️"
+            logger.info(f"Batch işlemi: {i+1}/{len(cards)}. kart tamamlandı. {status_text}")
             
         except Exception as e:
             logger.error(f"Batch işlemi hatası (kart {i+1}): {e}")
             results[i] = CardCheckResponse(
                 status="error",
+                verified=False,
+                isLive=False,
                 message=f"İşlem hatası: {str(e)}",
                 card={"error": str(e)},
                 binInfo=None,
@@ -593,8 +626,8 @@ async def root():
             {"path": "/", "method": "GET", "description": "API bilgileri"},
             {"path": "/docs", "method": "GET", "description": "Swagger dokümantasyonu"},
             {"path": "/health", "method": "GET", "description": "Sağlık kontrolü"},
-            {"path": "/check", "method": "POST", "description": "Tek kart doğrulama"},
-            {"path": "/check/batch", "method": "POST", "description": "Toplu kart doğrulama (max 20)"},
+            {"path": "/process", "method": "POST", "description": "Tek kart doğrulama"},
+            {"path": "/process/batch", "method": "POST", "description": "Toplu kart doğrulama (max 20)"},
             {"path": "/cards/live", "method": "GET", "description": "Live kartları listele"},
             {"path": "/cards/stats", "method": "GET", "description": "Live kart istatistikleri"}
         ]
@@ -609,8 +642,8 @@ async def health_check():
         "timestamp": datetime.now().isoformat()
     }
 
-@app.post("/check", response_model=CardCheckResponse)
-async def check_single_card(
+@app.post("/process", response_model=CardCheckResponse)
+async def process_single_card(
     request: CardCheckRequest,
     auth: str = Depends(verify_auth)
 ):
@@ -628,8 +661,8 @@ async def check_single_card(
         logger.error(f"[API] Hata: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/check/batch", response_model=BatchCardResponse)
-async def check_batch_cards(
+@app.post("/process/batch", response_model=BatchCardResponse)
+async def process_batch_cards(
     request: BatchCardRequest,
     auth: str = Depends(verify_auth)
 ):
@@ -640,7 +673,6 @@ async def check_batch_cards(
     Sonuçlar sıralı olarak döner
     Live kartlar otomatik olarak DB'ye kaydedilir
     """
-    # Batch boyutu kontrolü
     if len(request.cards) > BATCH_SIZE:
         raise HTTPException(
             status_code=400,
@@ -657,12 +689,10 @@ async def check_batch_cards(
         batch_id = hashlib.md5(str(time.time()).encode()).hexdigest()[:12]
         logger.info(f"[BATCH] {batch_id} - İşlem başladı. Toplam kart: {len(request.cards)}")
         
-        # Kartları işle
         results = await process_batch(request.cards)
         
-        # İstatistikler
-        live_count = sum(1 for r in results if r.status == "live")
-        dead_count = sum(1 for r in results if r.status == "dead")
+        live_count = sum(1 for r in results if r.isLive)
+        dead_count = sum(1 for r in results if r.verified == False and r.isLive == False)
         error_count = sum(1 for r in results if r.status == "error")
         
         logger.info(f"[BATCH] {batch_id} - Tamamlandı. Live: {live_count}, Dead: {dead_count}, Error: {error_count}")
@@ -697,7 +727,6 @@ async def list_live_cards(
         cards = []
         for doc in cursor:
             doc["_id"] = str(doc["_id"])
-            # Hassas bilgileri gizle
             if "cvv" in doc:
                 doc["cvv"] = "***"
             if "pan" in doc:
