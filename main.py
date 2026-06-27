@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Security, status
+from fastapi import FastAPI, Depends, HTTPException, Security, status, BackgroundTasks
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
@@ -12,15 +12,22 @@ import json
 import os
 import logging
 from pymongo import MongoClient
+from urllib.parse import quote_plus
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # ================== LOGGING ==================
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Clover Live Card Checker API",
-    description="Clover ile Kart Doğrulama API'si",
-    version="2.0.0"
+    description="Clover ile Kart Doğrulama API'si - Batch ve Single Mode",
+    version="3.0.0"
 )
 security = HTTPBearer()
 
@@ -37,16 +44,37 @@ def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
     return credentials.credentials
 
 # ================== MONGODB ==================
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb+srv://paymentmanger.gvaavzc.mongodb.net/?authSource=%24external&authMechanism=MONGODB-X509&appName=paymentmanger")
+MONGODB_URI = os.getenv("MONGODB_URI", "")
+MONGODB_USER = os.getenv("MONGODB_USER", "")
+MONGODB_PASS = os.getenv("MONGODB_PASS", "")
 
 try:
-    client = MongoClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
-    db = client["paymentmanger"]
-    live_cards_collection = db["liveCards"]
-    logger.info("[+] MongoDB bağlantısı başarılı")
+    if MONGODB_URI:
+        if MONGODB_USER and MONGODB_PASS:
+            if "mongodb+srv://" in MONGODB_URI:
+                uri_parts = MONGODB_URI.split("://")
+                if len(uri_parts) == 2:
+                    host_part = uri_parts[1].split("/")
+                    if len(host_part) >= 2:
+                        host = host_part[0]
+                        db_name = host_part[1].split("?")[0]
+                        encoded_user = quote_plus(MONGODB_USER)
+                        encoded_pass = quote_plus(MONGODB_PASS)
+                        MONGODB_URI = f"mongodb+srv://{encoded_user}:{encoded_pass}@{host}/{db_name}"
+        
+        client = MongoClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
+        db = client["paymentmanger"]
+        live_cards_collection = db["liveCards"]
+        logger.info("[+] MongoDB bağlantısı başarılı")
+    else:
+        logger.warning("[!] MONGODB_URI environment variable not set")
+        client = None
+        db = None
+        live_cards_collection = None
 except Exception as e:
     logger.error(f"[!] MongoDB hatası: {e}")
     client = None
+    db = None
     live_cards_collection = None
 
 # ================== MODELS ==================
@@ -58,6 +86,9 @@ class CardCheckRequest(BaseModel):
     zip: Optional[str] = Field("00000", description="Posta kodu", example="10001")
     holderName: Optional[str] = Field(None, description="Kart sahibi adı", example="John Doe")
 
+class BatchCardRequest(BaseModel):
+    cards: List[CardCheckRequest] = Field(..., description="Kart listesi (max 20)", max_items=20)
+
 class CardCheckResponse(BaseModel):
     status: str = Field(..., description="Durum: live / dead / error")
     message: str = Field(..., description="Sonuç mesajı")
@@ -65,6 +96,13 @@ class CardCheckResponse(BaseModel):
     binInfo: Optional[Dict] = Field(None, description="BIN bilgileri")
     verification: Optional[Dict] = Field(None, description="Doğrulama sonucu")
     dbSaved: bool = Field(False, description="Veritabanına kaydedildi mi?")
+    timestamp: str = Field(..., description="İşlem zamanı")
+
+class BatchCardResponse(BaseModel):
+    batch_id: str = Field(..., description="Batch ID")
+    total: int = Field(..., description="Toplam kart sayısı")
+    processed: int = Field(..., description="İşlenen kart sayısı")
+    results: List[CardCheckResponse] = Field(..., description="Sonuçlar")
     timestamp: str = Field(..., description="İşlem zamanı")
 
 # ================== CLOVER CONFIG ==================
@@ -76,7 +114,13 @@ CLOVER_CONFIG = {
     "charge_url": "https://api.clover.com/v1/charges"
 }
 
-MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() in ["1", "true", "yes", "on"]
+MOCK_MODE = os.getenv("MOCK_MODE", "true").lower() in ["1", "true", "yes", "on"]
+BATCH_DELAY = float(os.getenv("BATCH_DELAY", "2.0"))  # 2 saniye delay
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))  # Maksimum batch boyutu
+
+# Rate limiting için semaphore
+RATE_LIMIT = int(os.getenv("RATE_LIMIT", "10"))  # Saniyede maksimum istek
+semaphore = asyncio.Semaphore(RATE_LIMIT)
 
 # ================== HELPER FUNCTIONS ==================
 
@@ -108,71 +152,86 @@ def normalize_expiry(exp: str) -> Optional[Dict]:
     return {"month": month, "year": year, "expiry": f"{month}/{year}"}
 
 def parse_card_string(card_str: str) -> Optional[Dict]:
-    parts = card_str.strip().split('|')
-    if len(parts) < 3:
-        return None
-    pan = parts[0].strip()
-    if not pan or len(pan) < 13 or len(pan) > 19:
-        return None
-    expiry = None
-    cvv = None
-    for i, part in enumerate(parts[1:], 1):
-        part = part.strip()
-        if '/' in part:
-            exp_parts = part.split('/')
-            if len(exp_parts) == 2:
-                month = exp_parts[0].strip().zfill(2)
-                year = exp_parts[1].strip()
-                if len(year) == 2:
-                    year = f"20{year}"
-                expiry = f"{month}/{year}"
-                if i < len(parts):
-                    next_part = parts[i+1].strip()
-                    if next_part.isdigit() and len(next_part) in [3, 4]:
-                        cvv = next_part
-                break
-        if part.isdigit() and len(part) in [3, 4] and not cvv:
-            cvv = part
-            continue
-        if part.isdigit() and len(part) in [1, 2] and not expiry:
-            if i < len(parts):
-                next_part = parts[i+1].strip()
-                if next_part.isdigit() and len(next_part) in [2, 4]:
-                    month = part.zfill(2)
-                    year = next_part
+    try:
+        parts = card_str.strip().split('|')
+        if len(parts) < 3:
+            return None
+        
+        pan = parts[0].strip()
+        if not pan or len(pan) < 13 or len(pan) > 19:
+            return None
+        
+        expiry = None
+        cvv = None
+        
+        for i, part in enumerate(parts[1:], 1):
+            part = part.strip()
+            if '/' in part and not expiry:
+                exp_parts = part.split('/')
+                if len(exp_parts) == 2:
+                    month = exp_parts[0].strip().zfill(2)
+                    year = exp_parts[1].strip()
                     if len(year) == 2:
                         year = f"20{year}"
-                    expiry = f"{month}/{year}"
-                    if i + 1 < len(parts):
-                        cvv_part = parts[i+2].strip()
-                        if cvv_part.isdigit() and len(cvv_part) in [3, 4]:
-                            cvv = cvv_part
-                    break
-    if not expiry or not cvv:
+                    if len(year) == 4:
+                        expiry = f"{month}/{year}"
+                        if i < len(parts) - 1:
+                            next_part = parts[i+1].strip()
+                            if next_part.isdigit() and len(next_part) in [3, 4]:
+                                cvv = next_part
+            elif part.isdigit() and len(part) in [3, 4] and not cvv:
+                cvv = part
+        
+        if not expiry:
+            for i, part in enumerate(parts[1:], 1):
+                if part.isdigit() and len(part) in [1, 2]:
+                    if i < len(parts) - 1:
+                        next_part = parts[i+1].strip()
+                        if next_part.isdigit() and len(next_part) in [2, 4]:
+                            month = part.zfill(2)
+                            year = next_part
+                            if len(year) == 2:
+                                year = f"20{year}"
+                            expiry = f"{month}/{year}"
+                            if i + 1 < len(parts) - 1:
+                                cvv_part = parts[i+2].strip()
+                                if cvv_part.isdigit() and len(cvv_part) in [3, 4]:
+                                    cvv = cvv_part
+                            break
+        
+        if not expiry or not cvv:
+            return None
+        
+        return {
+            "pan": pan,
+            "expiry": expiry,
+            "cvv": cvv,
+            "month": expiry.split('/')[0],
+            "year": expiry.split('/')[1]
+        }
+    except Exception as e:
+        logger.error(f"Parse error: {e}")
         return None
-    return {
-        "pan": pan,
-        "expiry": expiry,
-        "cvv": cvv,
-        "month": expiry.split('/')[0],
-        "year": expiry.split('/')[1]
-    }
 
 def parse_input(request: CardCheckRequest) -> Optional[Dict]:
     if request.card:
         parsed = parse_card_string(request.card)
         if parsed:
             return parsed
+    
     if request.pan and request.exp and request.cvv:
         pan = digits_only(request.pan)
         if len(pan) < 13 or len(pan) > 19:
             return None
+        
         expiry_info = normalize_expiry(request.exp)
         if not expiry_info:
             return None
+        
         cvv = digits_only(request.cvv)
         if len(cvv) < 3 or len(cvv) > 4:
             return None
+        
         return {
             "pan": pan,
             "expiry": expiry_info["expiry"],
@@ -180,18 +239,23 @@ def parse_input(request: CardCheckRequest) -> Optional[Dict]:
             "month": expiry_info["month"],
             "year": expiry_info["year"]
         }
+    
     return None
 
 # ================== BIN LOOKUP ==================
 class BinLookup:
     def __init__(self):
         self.cache = {}
+        self.cache_lock = threading.Lock()
         self.binlist_url = "https://lookup.binlist.net/"
     
     def get_bin_info(self, bin_number: str) -> Dict:
         bin_6 = digits_only(bin_number)[:6]
-        if bin_6 in self.cache:
-            return self.cache[bin_6]
+        
+        with self.cache_lock:
+            if bin_6 in self.cache:
+                return self.cache[bin_6].copy()
+        
         result = {
             "bin": bin_6,
             "brand": "UNKNOWN",
@@ -203,15 +267,21 @@ class BinLookup:
             "currency": "USD",
             "valid": False
         }
+        
         try:
-            r = requests.get(f"{self.binlist_url}{bin_6}", timeout=10, headers={"Accept-Version": "3"})
-            if r.status_code == 200:
-                data = r.json()
+            response = requests.get(
+                f"{self.binlist_url}{bin_6}",
+                timeout=10,
+                headers={"Accept-Version": "3"}
+            )
+            if response.status_code == 200:
+                data = response.json()
                 bank = data.get("bank", {})
                 country = data.get("country", {})
                 brand = data.get("scheme", "UNKNOWN").upper()
                 brand_name = data.get("brand", "").upper()
                 card_type = data.get("type", "UNKNOWN").upper()
+                
                 level = "STANDARD"
                 if "PLATINUM" in brand_name:
                     level = "PLATINUM"
@@ -225,6 +295,7 @@ class BinLookup:
                     level = "WORLD"
                 elif "BUSINESS" in brand_name:
                     level = "BUSINESS"
+                
                 result.update({
                     "brand": brand,
                     "type": card_type,
@@ -237,7 +308,10 @@ class BinLookup:
                 })
         except Exception as e:
             logger.warning(f"[BIN] Hata: {e}")
-        self.cache[bin_6] = result
+        
+        with self.cache_lock:
+            self.cache[bin_6] = result.copy()
+        
         return result
 
 bin_lookup = BinLookup()
@@ -254,6 +328,7 @@ def clover_verify_card(card_data: Dict) -> Dict:
             "isLive": is_live,
             "mock": True
         }
+    
     try:
         token_payload = {
             "card": {
@@ -267,18 +342,21 @@ def clover_verify_card(card_data: Dict) -> Dict:
             "Content-Type": "application/json",
             "apikey": CLOVER_CONFIG["public_token"]
         }
+        
         token_response = requests.post(
             CLOVER_CONFIG["token_url"],
             json=token_payload,
             headers=token_headers,
             timeout=15
         )
+        
         if token_response.status_code != 200:
             return {
                 "status": "error",
                 "isLive": False,
                 "error": f"Tokenization failed: HTTP {token_response.status_code}"
             }
+        
         token_data = token_response.json()
         token_id = token_data.get("id")
         if not token_id:
@@ -287,6 +365,7 @@ def clover_verify_card(card_data: Dict) -> Dict:
                 "isLive": False,
                 "error": "No token received"
             }
+        
         charge_payload = {
             "amount": 50,
             "currency": "usd",
@@ -297,12 +376,14 @@ def clover_verify_card(card_data: Dict) -> Dict:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {CLOVER_CONFIG['private_token']}"
         }
+        
         charge_response = requests.post(
             CLOVER_CONFIG["charge_url"],
             json=charge_payload,
             headers=charge_headers,
             timeout=15
         )
+        
         if charge_response.status_code in [200, 201, 202]:
             charge_data = charge_response.json()
             is_live = charge_data.get("status") in ["succeeded", "approved", "authorized"]
@@ -313,6 +394,7 @@ def clover_verify_card(card_data: Dict) -> Dict:
                 "isLive": is_live,
                 "token": token_id
             }
+        
         return {
             "status": "error",
             "isLive": False,
@@ -331,6 +413,7 @@ def clover_verify_card(card_data: Dict) -> Dict:
 def save_to_mongodb(card_data: Dict, bin_info: Dict, verification: Dict) -> Dict:
     if not live_cards_collection:
         return {"saved": False, "error": "MongoDB not connected"}
+    
     doc = {
         "pan": card_data["pan"],
         "masked": mask_pan(card_data["pan"]),
@@ -354,6 +437,7 @@ def save_to_mongodb(card_data: Dict, bin_info: Dict, verification: Dict) -> Dict
         "isLive": True,
         "verifiedAt": datetime.now().isoformat()
     }
+    
     try:
         result = live_cards_collection.insert_one(doc)
         logger.info(f"[DB] Kart kaydedildi: {doc['masked']}")
@@ -362,9 +446,9 @@ def save_to_mongodb(card_data: Dict, bin_info: Dict, verification: Dict) -> Dict
         logger.error(f"[DB] Kayıt hatası: {e}")
         return {"saved": False, "error": str(e)}
 
-# ================== MAIN CHECK FUNCTION ==================
+# ================== CARD CHECK FUNCTION (Single) ==================
 
-def check_card(request: CardCheckRequest) -> CardCheckResponse:
+def check_card_single(request: CardCheckRequest) -> CardCheckResponse:
     parsed = parse_input(request)
     if not parsed:
         return CardCheckResponse(
@@ -376,6 +460,7 @@ def check_card(request: CardCheckRequest) -> CardCheckResponse:
             dbSaved=False,
             timestamp=datetime.now().isoformat()
         )
+    
     pan = parsed["pan"]
     expiry = parsed["expiry"]
     month = parsed["month"]
@@ -384,6 +469,7 @@ def check_card(request: CardCheckRequest) -> CardCheckResponse:
     zip_code = digits_only(request.zip) or "00000"
     if len(zip_code) < 5:
         zip_code = "00000"
+    
     card_data = {
         "pan": pan,
         "month": month,
@@ -393,6 +479,7 @@ def check_card(request: CardCheckRequest) -> CardCheckResponse:
         "zip": zip_code,
         "holderName": request.holderName or ""
     }
+    
     card_response = {
         "pan": pan,
         "masked": mask_pan(pan),
@@ -401,11 +488,14 @@ def check_card(request: CardCheckRequest) -> CardCheckResponse:
         "zip": zip_code,
         "holderName": request.holderName or ""
     }
+    
     verification = clover_verify_card(card_data)
     is_live = verification.get("isLive", False)
+    
     if is_live:
         bin_info = bin_lookup.get_bin_info(pan)
         save_result = save_to_mongodb(card_data, bin_info, verification)
+        
         return CardCheckResponse(
             status="live",
             message="Kart doğrulandı ve live olarak kaydedildi",
@@ -415,9 +505,11 @@ def check_card(request: CardCheckRequest) -> CardCheckResponse:
             dbSaved=save_result.get("saved", False),
             timestamp=datetime.now().isoformat()
         )
+    
+    error_msg = verification.get('error', 'Doğrulama başarısız')
     return CardCheckResponse(
         status="dead",
-        message=f"Kart geçersiz: {verification.get('error', 'Doğrulama başarısız')}",
+        message=f"Kart geçersiz: {error_msg}",
         card=card_response,
         binInfo=None,
         verification=verification,
@@ -425,19 +517,84 @@ def check_card(request: CardCheckRequest) -> CardCheckResponse:
         timestamp=datetime.now().isoformat()
     )
 
+# ================== BATCH CARD CHECK ==================
+
+async def check_card_async(request: CardCheckRequest, index: int) -> tuple:
+    """Asenkron kart kontrolü"""
+    try:
+        # Rate limiting
+        async with semaphore:
+            # Thread pool ile senkron fonksiyonu çalıştır
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor() as pool:
+                result = await loop.run_in_executor(pool, check_card_single, request)
+            return index, result
+    except Exception as e:
+        logger.error(f"Kart kontrol hatası (index {index}): {e}")
+        error_response = CardCheckResponse(
+            status="error",
+            message=f"Kontrol hatası: {str(e)}",
+            card={"error": str(e)},
+            binInfo=None,
+            verification=None,
+            dbSaved=False,
+            timestamp=datetime.now().isoformat()
+        )
+        return index, error_response
+
+async def process_batch(cards: List[CardCheckRequest]) -> List[CardCheckResponse]:
+    """Batch işleme - sıralı ve delay ile"""
+    results = [None] * len(cards)
+    
+    for i, card in enumerate(cards):
+        try:
+            # 2 saniye delay (ilk kart için bekleme yok)
+            if i > 0:
+                logger.info(f"Batch işlemi: {i}. kart için 2 saniye bekleniyor...")
+                await asyncio.sleep(BATCH_DELAY)
+            
+            # Kartı kontrol et
+            logger.info(f"Batch işlemi: {i+1}/{len(cards)}. kart kontrol ediliyor...")
+            index, result = await check_card_async(card, i)
+            results[index] = result
+            
+            logger.info(f"Batch işlemi: {i+1}/{len(cards)}. kart tamamlandı. Status: {result.status}")
+            
+        except Exception as e:
+            logger.error(f"Batch işlemi hatası (kart {i+1}): {e}")
+            results[i] = CardCheckResponse(
+                status="error",
+                message=f"İşlem hatası: {str(e)}",
+                card={"error": str(e)},
+                binInfo=None,
+                verification=None,
+                dbSaved=False,
+                timestamp=datetime.now().isoformat()
+            )
+    
+    return results
+
 # ================== API ENDPOINTS ==================
 
 @app.get("/")
 async def root():
     return {
         "name": "Clover Live Card Checker API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "status": "active",
         "mock_mode": MOCK_MODE,
+        "mongodb_connected": live_cards_collection is not None,
+        "batch_config": {
+            "max_batch_size": BATCH_SIZE,
+            "delay_between_cards": f"{BATCH_DELAY} seconds",
+            "rate_limit": f"{RATE_LIMIT} requests/second"
+        },
         "endpoints": [
+            {"path": "/", "method": "GET", "description": "API bilgileri"},
             {"path": "/docs", "method": "GET", "description": "Swagger dokümantasyonu"},
             {"path": "/health", "method": "GET", "description": "Sağlık kontrolü"},
-            {"path": "/check", "method": "POST", "description": "Kart doğrulama"},
+            {"path": "/check", "method": "POST", "description": "Tek kart doğrulama"},
+            {"path": "/check/batch", "method": "POST", "description": "Toplu kart doğrulama (max 20)"},
             {"path": "/cards/live", "method": "GET", "description": "Live kartları listele"},
             {"path": "/cards/stats", "method": "GET", "description": "Live kart istatistikleri"}
         ]
@@ -452,16 +609,74 @@ async def health_check():
         "timestamp": datetime.now().isoformat()
     }
 
-@app.post("/check")
+@app.post("/check", response_model=CardCheckResponse)
 async def check_single_card(
     request: CardCheckRequest,
     auth: str = Depends(verify_auth)
 ):
+    """
+    Tek kart doğrulama
+    
+    Formatlar:
+    1. Tek tek: pan, exp, cvv
+    2. String format: card="4514011614153896|07/2026|234"
+    """
     try:
-        result = check_card(request)
+        result = check_card_single(request)
         return result
     except Exception as e:
         logger.error(f"[API] Hata: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/check/batch", response_model=BatchCardResponse)
+async def check_batch_cards(
+    request: BatchCardRequest,
+    auth: str = Depends(verify_auth)
+):
+    """
+    Toplu kart doğrulama (max 20 kart)
+    
+    Her kart arasında 2 saniye delay ile sorgulanır
+    Sonuçlar sıralı olarak döner
+    Live kartlar otomatik olarak DB'ye kaydedilir
+    """
+    # Batch boyutu kontrolü
+    if len(request.cards) > BATCH_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {BATCH_SIZE} kart gönderilebilir. Gönderilen: {len(request.cards)}"
+        )
+    
+    if len(request.cards) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="En az 1 kart gönderilmelidir"
+        )
+    
+    try:
+        batch_id = hashlib.md5(str(time.time()).encode()).hexdigest()[:12]
+        logger.info(f"[BATCH] {batch_id} - İşlem başladı. Toplam kart: {len(request.cards)}")
+        
+        # Kartları işle
+        results = await process_batch(request.cards)
+        
+        # İstatistikler
+        live_count = sum(1 for r in results if r.status == "live")
+        dead_count = sum(1 for r in results if r.status == "dead")
+        error_count = sum(1 for r in results if r.status == "error")
+        
+        logger.info(f"[BATCH] {batch_id} - Tamamlandı. Live: {live_count}, Dead: {dead_count}, Error: {error_count}")
+        
+        return BatchCardResponse(
+            batch_id=batch_id,
+            total=len(request.cards),
+            processed=len(results),
+            results=results,
+            timestamp=datetime.now().isoformat()
+        )
+        
+    except Exception as e:
+        logger.error(f"[BATCH] Hata: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/cards/live")
@@ -472,15 +687,23 @@ async def list_live_cards(
 ):
     if not live_cards_collection:
         raise HTTPException(status_code=503, detail="MongoDB bağlantısı yok")
+    
     query = {"isLive": True}
     if brand:
         query["brand"] = brand.upper()
+    
     try:
         cursor = live_cards_collection.find(query).sort("verifiedAt", -1).limit(limit)
         cards = []
         for doc in cursor:
             doc["_id"] = str(doc["_id"])
+            # Hassas bilgileri gizle
+            if "cvv" in doc:
+                doc["cvv"] = "***"
+            if "pan" in doc:
+                doc["pan"] = mask_pan(doc["pan"])
             cards.append(doc)
+        
         return {"total": len(cards), "cards": cards}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -491,23 +714,74 @@ async def card_statistics(
 ):
     if not live_cards_collection:
         raise HTTPException(status_code=503, detail="MongoDB bağlantısı yok")
+    
     try:
         total = live_cards_collection.count_documents({"isLive": True})
+        
         brand_stats = live_cards_collection.aggregate([
             {"$match": {"isLive": True}},
             {"$group": {"_id": "$brand", "count": {"$sum": 1}}}
         ])
+        
         brands = {}
         for item in brand_stats:
             brands[item["_id"]] = item["count"]
+        
+        country_stats = live_cards_collection.aggregate([
+            {"$match": {"isLive": True}},
+            {"$group": {"_id": "$country_name", "count": {"$sum": 1}}}
+        ])
+        
+        countries = {}
+        for item in country_stats:
+            countries[item["_id"]] = item["count"]
+        
+        level_stats = live_cards_collection.aggregate([
+            {"$match": {"isLive": True}},
+            {"$group": {"_id": "$level", "count": {"$sum": 1}}}
+        ])
+        
+        levels = {}
+        for item in level_stats:
+            levels[item["_id"]] = item["count"]
+        
         return {
             "totalLiveCards": total,
             "brands": brands,
+            "countries": countries,
+            "levels": levels,
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/cards/recent")
+async def get_recent_cards(
+    limit: int = 10,
+    auth: str = Depends(verify_auth)
+):
+    if not live_cards_collection:
+        raise HTTPException(status_code=503, detail="MongoDB bağlantısı yok")
+    
+    try:
+        cursor = live_cards_collection.find(
+            {"isLive": True}
+        ).sort("verifiedAt", -1).limit(limit)
+        
+        cards = []
+        for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            if "cvv" in doc:
+                doc["cvv"] = "***"
+            if "pan" in doc:
+                doc["pan"] = mask_pan(doc["pan"])
+            cards.append(doc)
+        
+        return {"recent": cards}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
