@@ -1,15 +1,15 @@
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Security
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, FileResponse
+from pydantic import BaseModel, Field
+from typing import Dict, List, Optional, Any
+from datetime import datetime
 import requests
 import re
 import time
 import random
 import hashlib
 import csv
-import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional, Any
-from datetime import datetime
 import json
 import os
 import logging
@@ -20,7 +20,28 @@ from pymongo import MongoClient
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Clover Live Checker + BIN API")
+app = FastAPI(
+    title="Clover Live Card Checker API",
+    description="""
+    ## Clover ile Kart Doğrulama ve BIN Sorgulama API'si
+    
+    Bu API ile:
+    - Kartları normalize edip Clover üzerinden doğrulayabilirsiniz
+    - BIN sorgulama yapabilirsiniz
+    - Toplu kart işleme yapabilirsiniz
+    - Live kartları listeleyebilirsiniz
+    
+    ### Kart Formatları
+    - `PAN|MM/YYYY/CCVV` → `PAN|MM/YYYY|CCVV`
+    - `PAN|MM|YYYY|CCVV|...` → `PAN|MM/YYYY|CCVV`
+    - `PAN|MM/YYYY|CCVV` → aynen kalır
+    """,
+    version="2.0.0",
+    contact={
+        "name": "API Support",
+        "email": "info@internationalliaison.com"
+    }
+)
 security = HTTPBearer()
 
 # ================== AUTH ==================
@@ -28,7 +49,11 @@ AUTH_TOKEN = os.getenv("AUTH_TOKEN", "b9f3k7m2v8t3w5z1q6p9c4b7n2v8m2025")
 
 def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
     if credentials.credentials != AUTH_TOKEN:
-        raise HTTPException(status_code=401, detail="Geçersiz token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Geçersiz token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return credentials.credentials
 
 # ================== MONGODB ==================
@@ -37,26 +62,43 @@ MONGODB_URI = os.getenv("MONGODB_URI", "mongodb+srv://paymentmanger.gvaavzc.mong
 try:
     client = MongoClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
     db = client["paymentmanger"]
-    collection = db["live_balance_results"]
     generated_cards_collection = db["generatedCards"]
     logger.info("[+] MongoDB bağlantısı başarılı")
 except Exception as e:
     logger.error(f"[!] MongoDB hatası: {e}")
     client = None
-    collection = None
     generated_cards_collection = None
 
 # ================== MODELS ==================
 class CardCheckRequest(BaseModel):
-    bin: Optional[str] = None
-    pan: Optional[str] = None
-    cardNumber: Optional[str] = None
-    exp: Optional[str] = None
-    expMonth: Optional[str] = None
-    expYear: Optional[str] = None
-    cvv: Optional[str] = None
-    zip: Optional[str] = None
-    billingZip: Optional[str] = None
+    """Kart doğrulama isteği"""
+    pan: Optional[str] = Field(None, description="Kart numarası", example="4514011614153896")
+    cardNumber: Optional[str] = Field(None, description="Kart numarası (alternatif)", example="4514011614153896")
+    exp: Optional[str] = Field(None, description="Son kullanma tarihi (MM/YYYY)", example="07/2026")
+    expMonth: Optional[str] = Field(None, description="Son kullanma ayı", example="07")
+    expYear: Optional[str] = Field(None, description="Son kullanma yılı", example="2026")
+    cvv: Optional[str] = Field(None, description="CVV kodu", example="234")
+    zip: Optional[str] = Field(None, description="Posta kodu", example="00000")
+    billingZip: Optional[str] = Field(None, description="Fatura posta kodu", example="00000")
+
+class CardProcessRequest(BaseModel):
+    """Tek kart işleme isteği"""
+    card: str = Field(..., description="Kart string'i", example="4514011614153896|07/2026|234")
+
+class BatchProcessRequest(BaseModel):
+    """Toplu kart işleme isteği"""
+    cards: List[str] = Field(..., description="Kart listesi", example=["4514011614153896|07/2026|234", "5348690004625057|11/2026|469"])
+    delay: Optional[float] = Field(2.0, description="Kart arası bekleme süresi (saniye)", ge=0.5, le=10)
+
+class ProcessResult(BaseModel):
+    """İşlem sonucu"""
+    original: str
+    normalized: Optional[str] = None
+    verified: bool = False
+    isLive: bool = False
+    error: Optional[str] = None
+    binInfo: Optional[Dict] = None
+    verification: Optional[Dict] = None
 
 # ================== CLOVER CONFIG ==================
 CLOVER_CONFIG = {
@@ -86,7 +128,6 @@ def normalize_card_line(card_str: str) -> Optional[str]:
     Kart formatını normalize eder:
     - 4514011614153896|07/2026/20234 → 4514011614153896|07/2026|234
     - 4514011614153896|07/2026|234 → 4514011614153896|07/2026|234
-    - 4514011614153896|07|2026|234 → 4514011614153896|07/2026|234
     - 5183230102242436|09|2026|978|XX|UNKNOWN|UNKNOWN|NMI → 5183230102242436|09/2026|978
     """
     parts = card_str.strip().split('|')
@@ -98,7 +139,6 @@ def normalize_card_line(card_str: str) -> Optional[str]:
     if not pan or len(pan) < 13 or len(pan) > 19:
         return None
     
-    # Tüm parçalardan sayıları topla
     numbers = []
     for part in parts[1:]:
         clean = re.sub(r'\D', '', part)
@@ -108,7 +148,6 @@ def normalize_card_line(card_str: str) -> Optional[str]:
     if len(numbers) < 2:
         return None
     
-    # AY: ilk 1-2 haneli sayı
     month = None
     for num in numbers:
         if len(num) in [1, 2]:
@@ -118,7 +157,6 @@ def normalize_card_line(card_str: str) -> Optional[str]:
     if not month:
         return None
     
-    # YIL: sonraki 2-4 haneli sayı (month değilse)
     year = None
     for num in numbers:
         if num != month and len(num) in [2, 4]:
@@ -128,13 +166,11 @@ def normalize_card_line(card_str: str) -> Optional[str]:
     if not year:
         return None
     
-    # Yıl'ı 4 haneli yap
     if len(year) == 2:
         year = f"20{year}"
     elif len(year) != 4:
         return None
     
-    # CVV: 3-4 haneli sayı (month veya year olmayan)
     cvv = ""
     for num in numbers:
         if num not in [month, year] and len(num) in [3, 4]:
@@ -147,7 +183,6 @@ def normalize_card_line(card_str: str) -> Optional[str]:
     return f"{pan}|{month}/{year}|{cvv}"
 
 def parse_card_line(line: str) -> Optional[Dict]:
-    """Normalize edilmiş kartı parse et"""
     normalized = normalize_card_line(line)
     if not normalized:
         return None
@@ -191,14 +226,10 @@ class BinLookup:
             "brand": "UNKNOWN",
             "type": "UNKNOWN",
             "level": "STANDARD",
-            "level_detail": "Standard Card",
             "bank": "Unknown",
             "country": "XX",
             "country_name": "Unknown",
             "currency": "USD",
-            "prepaid": False,
-            "commercial": False,
-            "source": "none",
             "valid": False
         }
         
@@ -213,38 +244,25 @@ class BinLookup:
                 card_type = data.get("type", "UNKNOWN").upper()
                 
                 level = "STANDARD"
-                level_detail = "Standard Card"
                 if "PLATINUM" in brand_name:
                     level = "PLATINUM"
-                    level_detail = "Platinum Card"
                 elif "GOLD" in brand_name:
                     level = "GOLD"
-                    level_detail = "Gold Card"
                 elif "SIGNATURE" in brand_name:
                     level = "SIGNATURE"
-                    level_detail = "Signature Card"
                 elif "INFINITE" in brand_name:
                     level = "INFINITE"
-                    level_detail = "Infinite Card"
                 elif "WORLD" in brand_name:
                     level = "WORLD"
-                    level_detail = "World Card"
-                elif "BUSINESS" in brand_name:
-                    level = "BUSINESS"
-                    level_detail = "Business Card"
                 
                 result.update({
                     "brand": brand,
                     "type": card_type,
                     "level": level,
-                    "level_detail": level_detail,
                     "bank": bank.get("name", "Unknown"),
                     "country": country.get("alpha2", "XX"),
                     "country_name": country.get("name", "Unknown"),
                     "currency": country.get("currency", "USD"),
-                    "prepaid": data.get("prepaid", False),
-                    "commercial": data.get("commercial", False),
-                    "source": "binlist.net",
                     "valid": True
                 })
         except Exception as e:
@@ -258,7 +276,6 @@ bin_lookup = BinLookup()
 # ================== CLOVER VERIFY ==================
 
 def clover_verify_card(card_data: Dict) -> Dict:
-    """Clover ile kart doğrulama"""
     if MOCK_MODE:
         is_live = random.random() < 0.15
         return {
@@ -269,12 +286,10 @@ def clover_verify_card(card_data: Dict) -> Dict:
         }
     
     try:
-        # ZIP kontrolü
         zip_code = card_data.get("zip", "00000")
         if not zip_code or len(zip_code) < 5:
             zip_code = "00000"
         
-        # 1. Tokenize
         token_payload = {
             "card": {
                 "number": card_data["pan"],
@@ -300,8 +315,7 @@ def clover_verify_card(card_data: Dict) -> Dict:
             return {
                 "status": "error",
                 "isLive": False,
-                "error": f"Tokenization failed: HTTP {token_response.status_code}",
-                "provider": "clover"
+                "error": f"Tokenization failed: HTTP {token_response.status_code}"
             }
         
         token_data = token_response.json()
@@ -311,17 +325,14 @@ def clover_verify_card(card_data: Dict) -> Dict:
             return {
                 "status": "error",
                 "isLive": False,
-                "error": "No token received",
-                "provider": "clover"
+                "error": "No token received"
             }
         
-        # 2. Charge (0.50 test)
         charge_payload = {
             "amount": 50,
             "currency": "usd",
             "source": token_id,
-            "capture": False,
-            "metadata": {"test": "true"}
+            "capture": False
         }
         
         charge_headers = {
@@ -351,8 +362,7 @@ def clover_verify_card(card_data: Dict) -> Dict:
         return {
             "status": "error",
             "isLive": False,
-            "error": f"Charge failed: HTTP {charge_response.status_code}",
-            "provider": "clover"
+            "error": f"Charge failed: HTTP {charge_response.status_code}"
         }
         
     except Exception as e:
@@ -360,83 +370,56 @@ def clover_verify_card(card_data: Dict) -> Dict:
         return {
             "status": "error",
             "isLive": False,
-            "error": str(e),
-            "provider": "clover"
+            "error": str(e)
         }
 
-# ================== FORMATTED CARDS FILE ==================
-
-def read_formatted_cards_file() -> List[str]:
-    """formatted_cards.txt dosyasını okur, yoksa oluşturur"""
-    file_path = Path("formatted_cards.txt")
-    if not file_path.exists():
-        file_path.touch()
-        logger.info("[+] formatted_cards.txt oluşturuldu")
-        return []
-    
-    with open(file_path, 'r', encoding='utf-8') as f:
-        cards = [line.strip() for line in f if line.strip()]
-    return cards
+# ================== FILE OPERATIONS ==================
 
 def append_formatted_card(card_line: str):
-    """formatted_cards.txt dosyasına kart ekler"""
     file_path = Path("formatted_cards.txt")
     with open(file_path, 'a', encoding='utf-8') as f:
         f.write(card_line + '\n')
 
 def append_live_card(card_line: str):
-    """live_cards.txt dosyasına kart ekler"""
     file_path = Path("live_cards.txt")
     with open(file_path, 'a', encoding='utf-8') as f:
         f.write(card_line + '\n')
 
-# ================== PROCESS CARDS ==================
+# ================== CORE PROCESS ==================
 
-def process_card(card_str: str) -> Dict:
-    """Tek bir kartı işle: normalize → format → verify → binCheck → save"""
-    result = {
-        "original": card_str,
-        "normalized": None,
-        "verified": False,
-        "isLive": False,
-        "binInfo": None,
-        "error": None
-    }
+def process_card(card_str: str) -> ProcessResult:
+    result = ProcessResult(
+        original=card_str,
+        verified=False,
+        isLive=False
+    )
     
-    # 1. Normalize et
     normalized = normalize_card_line(card_str)
     if not normalized:
-        result["error"] = "Normalization failed"
+        result.error = "Normalization failed"
         return result
     
-    result["normalized"] = normalized
-    
-    # 2. Formatlı dosyaya ekle
+    result.normalized = normalized
     append_formatted_card(normalized)
     
-    # 3. Kart verilerini parse et
     card_data = parse_card_line(normalized)
     if not card_data:
-        result["error"] = "Parse failed"
+        result.error = "Parse failed"
         return result
     
-    # ZIP kontrolü (formatted_cards.txt'den gelen kartta zip yoksa 00000)
     card_data["zip"] = "00000"
     
-    # 4. Clover ile doğrula
     verification = clover_verify_card(card_data)
-    result["verified"] = True
-    result["isLive"] = verification.get("isLive", False)
-    result["verification"] = verification
+    result.verified = True
+    result.isLive = verification.get("isLive", False)
+    result.verification = verification
     
-    if not result["isLive"]:
+    if not result.isLive:
         return result
     
-    # 5. BIN Check
     bin_info = bin_lookup.get_bin_info(card_data["pan"])
-    result["binInfo"] = bin_info
+    result.binInfo = bin_info
     
-    # 6. Live kartı kaydet - Format: PAN|EXP|CVV|COUNTRY|BANK|TYPE|LEVEL
     brand = bin_info.get("brand", "UNKNOWN")
     card_type = bin_info.get("type", "UNKNOWN")
     level = bin_info.get("level", "STANDARD")
@@ -446,7 +429,6 @@ def process_card(card_str: str) -> Dict:
     live_line = f"{card_data['pan']}|{card_data['expiry']}|{card_data['cvv']}|{country}|{bank}|{card_type}|{level}"
     append_live_card(live_line)
     
-    # MongoDB'ye de kaydet
     if generated_cards_collection:
         try:
             doc = {
@@ -470,68 +452,85 @@ def process_card(card_str: str) -> Dict:
 
 # ================== API ENDPOINTS ==================
 
-@app.get("/")
-async def home():
+@app.get("/", tags=["System"])
+async def root():
+    """API ana sayfası"""
     return {
-        "status": "Clover Live Checker API aktif",
+        "name": "Clover Live Card Checker API",
+        "version": "2.0.0",
+        "status": "active",
         "mock_mode": MOCK_MODE,
         "endpoints": [
-            "/process (POST)",
-            "/process/file (POST)",
-            "/bin/lookup (POST)",
-            "/cards/list (GET)",
-            "/cards/stats (GET)",
-            "/health (GET)"
-        ],
-        "auth_required": "Bearer token ile"
+            {"path": "/docs", "method": "GET", "description": "Swagger dokümantasyonu"},
+            {"path": "/health", "method": "GET", "description": "Sağlık kontrolü"},
+            {"path": "/process", "method": "POST", "description": "Tek kart işle"},
+            {"path": "/process/batch", "method": "POST", "description": "Toplu kart işle"},
+            {"path": "/process/file", "method": "POST", "description": "Dosyadan kart işle"},
+            {"path": "/bin/lookup", "method": "POST", "description": "BIN sorgulama"},
+            {"path": "/cards/live", "method": "GET", "description": "Live kartları listele"},
+            {"path": "/cards/stats", "method": "GET", "description": "Live kart istatistikleri"},
+            {"path": "/cards/export", "method": "GET", "description": "Live kartları dışa aktar"}
+        ]
     }
 
-@app.get("/health")
-async def health():
+@app.get("/health", tags=["System"])
+async def health_check():
+    """Sağlık kontrolü"""
     return {
         "status": "healthy",
         "mock_mode": MOCK_MODE,
-        "timestamp": datetime.now().isoformat(),
-        "mongodb": generated_cards_collection is not None
+        "mongodb": generated_cards_collection is not None,
+        "timestamp": datetime.now().isoformat()
     }
 
-@app.post("/process")
-async def process_card_endpoint(
-    card: str,
+@app.post(
+    "/process",
+    tags=["Card Processing"],
+    response_model=ProcessResult,
+    summary="Tek kart işle",
+    description="""
+    Tek bir kartı normalize eder, Clover ile doğrular ve live ise kaydeder.
+    
+    **Desteklenen formatlar:**
+    - `PAN|MM/YYYY/CCVV` → `PAN|MM/YYYY|CCVV`
+    - `PAN|MM|YYYY|CCVV|...` → `PAN|MM/YYYY|CCVV`
+    - `PAN|MM/YYYY|CCVV` → aynen kalır
+    """
+)
+async def process_single_card(
+    request: CardProcessRequest,
     auth: str = Depends(verify_auth)
 ):
-    """Tek kartı işle"""
     try:
-        result = process_card(card)
+        result = process_card(request.card)
         return result
     except Exception as e:
         logger.error(f"[API] Hata: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/process/file")
-async def process_file_endpoint(
-    file: UploadFile,
+@app.post(
+    "/process/batch",
+    tags=["Card Processing"],
+    summary="Toplu kart işle",
+    description="Birden fazla kartı toplu olarak işler. Her kart arasında belirtilen süre kadar bekler."
+)
+async def process_batch(
+    request: BatchProcessRequest,
     auth: str = Depends(verify_auth)
 ):
-    """Dosyadaki kartları işle"""
     try:
-        content = await file.read()
-        lines = [line.strip() for line in content.decode('utf-8').split('\n') if line.strip()]
-        
         results = []
-        total = len(lines)
+        total = len(request.cards)
         live_count = 0
         
-        for i, line in enumerate(lines, 1):
-            logger.info(f"[PROCESS] {i}/{total} kart işleniyor...")
-            result = process_card(line)
+        for i, card in enumerate(request.cards, 1):
+            logger.info(f"[BATCH] {i}/{total} kart işleniyor...")
+            result = process_card(card)
             results.append(result)
-            if result.get("isLive"):
+            if result.isLive:
                 live_count += 1
-                print(f"   ✅ [{i}] LIVE: {result['normalized']}")
-            else:
-                print(f"   ❌ [{i}] DEAD: {result.get('normalized', line)}")
-            time.sleep(2)  # 2 saniye bekle
+            if i < total:
+                time.sleep(request.delay)
         
         return {
             "total": total,
@@ -543,26 +542,74 @@ async def process_file_endpoint(
         logger.error(f"[API] Hata: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/bin/lookup")
-async def bin_lookup_endpoint(request: CardCheckRequest, auth: str = Depends(verify_auth)):
+@app.post(
+    "/process/file",
+    tags=["Card Processing"],
+    summary="Dosyadan kart işle",
+    description="Bir dosyadan kartları okuyarak toplu işlem yapar. Her kart arasında 2 saniye bekler."
+)
+async def process_file(
+    file: UploadFile = File(..., description="Kart listesi içeren dosya (.txt)"),
+    auth: str = Depends(verify_auth)
+):
+    try:
+        content = await file.read()
+        lines = [line.strip() for line in content.decode('utf-8').split('\n') if line.strip()]
+        
+        if not lines:
+            raise HTTPException(status_code=400, detail="Dosya boş")
+        
+        results = []
+        total = len(lines)
+        live_count = 0
+        
+        for i, line in enumerate(lines, 1):
+            logger.info(f"[FILE] {i}/{total} kart işleniyor...")
+            result = process_card(line)
+            results.append(result)
+            if result.isLive:
+                live_count += 1
+            if i < total:
+                time.sleep(2)
+        
+        return {
+            "total": total,
+            "live": live_count,
+            "dead": total - live_count,
+            "file": file.filename,
+            "results": results
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] Hata: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/bin/lookup",
+    tags=["BIN Lookup"],
+    summary="BIN sorgulama",
+    description="Kart numarasının ilk 6 hanesine göre BIN bilgilerini getirir."
+)
+async def lookup_bin(
+    request: CardCheckRequest,
+    auth: str = Depends(verify_auth)
+):
     try:
         pan = digits_only(request.bin or request.pan or request.cardNumber or "")
         if len(pan) < 6:
-            raise HTTPException(status_code=400, detail="Card number must be at least 6 digits")
+            raise HTTPException(status_code=400, detail="En az 6 hane gerekli")
+        
         bin_info = bin_lookup.get_bin_info(pan[:6])
         return {
             "bin": bin_info["bin"],
             "brand": bin_info["brand"],
             "type": bin_info["type"],
             "level": bin_info["level"],
-            "level_detail": bin_info["level_detail"],
             "bank": bin_info["bank"],
             "country": bin_info["country"],
             "country_name": bin_info["country_name"],
             "currency": bin_info["currency"],
-            "prepaid": bin_info["prepaid"],
-            "commercial": bin_info["commercial"],
-            "source": bin_info["source"],
             "valid": bin_info["valid"],
             "timestamp": datetime.now().isoformat()
         }
@@ -572,15 +619,19 @@ async def bin_lookup_endpoint(request: CardCheckRequest, auth: str = Depends(ver
         logger.error(f"[API] BIN lookup hatası: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/cards/list")
-async def list_cards(
+@app.get(
+    "/cards/live",
+    tags=["Cards"],
+    summary="Live kartları listele",
+    description="Veritabanına kaydedilmiş live kartları listeler."
+)
+async def list_live_cards(
     limit: int = 50,
     brand: Optional[str] = None,
     auth: str = Depends(verify_auth)
 ):
-    """Kayıtlı live kartları listele"""
     if not generated_cards_collection:
-        raise HTTPException(status_code=503, detail="MongoDB not connected")
+        raise HTTPException(status_code=503, detail="MongoDB bağlantısı yok")
     
     query = {"isLive": True}
     if brand:
@@ -592,18 +643,21 @@ async def list_cards(
         for doc in cursor:
             doc["_id"] = str(doc["_id"])
             cards.append(doc)
-        return {
-            "total": len(cards),
-            "cards": cards
-        }
+        return {"total": len(cards), "cards": cards}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/cards/stats")
-async def card_stats(auth: str = Depends(verify_auth)):
-    """Live kart istatistikleri"""
+@app.get(
+    "/cards/stats",
+    tags=["Cards"],
+    summary="Live kart istatistikleri",
+    description="Veritabanındaki live kartların istatistiklerini gösterir."
+)
+async def card_statistics(
+    auth: str = Depends(verify_auth)
+):
     if not generated_cards_collection:
-        raise HTTPException(status_code=503, detail="MongoDB not connected")
+        raise HTTPException(status_code=503, detail="MongoDB bağlantısı yok")
     
     try:
         total = generated_cards_collection.count_documents({"isLive": True})
@@ -622,6 +676,46 @@ async def card_stats(auth: str = Depends(verify_auth)):
             "brands": brands,
             "timestamp": datetime.now().isoformat()
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/cards/export",
+    tags=["Cards"],
+    summary="Live kartları dışa aktar",
+    description="Tüm live kartları CSV veya JSON formatında dışa aktarır."
+)
+async def export_cards(
+    format: str = "csv",
+    auth: str = Depends(verify_auth)
+):
+    if not generated_cards_collection:
+        raise HTTPException(status_code=503, detail="MongoDB bağlantısı yok")
+    
+    try:
+        cards = list(generated_cards_collection.find({"isLive": True}))
+        
+        if format.lower() == "csv":
+            header = "PAN,Expiry,CVV,Brand,Type,Level,Country,Bank,TransactionId,CreatedAt\n"
+            lines = []
+            for card in cards:
+                lines.append(f"{card['pan']},{card['expiry']},{card['cvv']},{card['brand']},{card['type']},{card['level']},{card['country']},{card['bank']},{card.get('transactionId', '')},{card.get('createdAt', '')}")
+            return JSONResponse(
+                content={
+                    "format": "csv",
+                    "content": header + "\n".join(lines),
+                    "count": len(cards)
+                },
+                headers={"Content-Disposition": f"attachment; filename=live_cards_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+            )
+        else:
+            for card in cards:
+                card["_id"] = str(card["_id"])
+            return {
+                "format": "json",
+                "cards": cards,
+                "count": len(cards)
+            }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
