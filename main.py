@@ -496,9 +496,9 @@ def check_card_single(request: CardCheckRequest) -> CardCheckResponse:
     # Clover ile doğrula
     verification = clover_verify_card(card_data)
     
-    # verification'dan bilgileri al
-    is_live = verification.get("isLive", False)
-    verification_status = verification.get("status", "unknown")
+    # verification'dan bilgileri al (güvenli)
+    is_live = verification.get("isLive", False) if verification else False
+    verification_status = verification.get("status", "unknown") if verification else "error"
     
     # Kart doğrulandı mı? (status approved/succeeded/authorized ise)
     is_verified = verification_status in ["approved", "succeeded", "authorized"] or is_live
@@ -521,9 +521,9 @@ def check_card_single(request: CardCheckRequest) -> CardCheckResponse:
         )
     
     # Dead veya Error durumu
-    error_msg = verification.get('error', 'Doğrulama başarısız')
+    error_msg = verification.get('error', 'Doğrulama başarısız') if verification else 'Doğrulama yapılamadı'
     
-    if verification_status == "error":
+    if verification_status == "error" or not verification:
         return CardCheckResponse(
             status="error",
             verified=False,
