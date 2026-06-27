@@ -6,12 +6,14 @@ import re
 import time
 import random
 import hashlib
+import csv
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import json
 import os
 import logging
+from pathlib import Path
 from pymongo import MongoClient
 
 # ================== LOGGING ==================
@@ -23,7 +25,6 @@ security = HTTPBearer()
 
 # ================== AUTH ==================
 AUTH_TOKEN = os.getenv("AUTH_TOKEN", "b9f3k7m2v8t3w5z1q6p9c4b7n2v8m2025")
-MOCK_MODE = os.getenv("MOCK_MODE", "true").lower() in {"1", "true", "yes", "on"}
 
 def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
     if credentials.credentials != AUTH_TOKEN:
@@ -47,6 +48,7 @@ except Exception as e:
 
 # ================== MODELS ==================
 class CardCheckRequest(BaseModel):
+    bin: Optional[str] = None
     pan: Optional[str] = None
     cardNumber: Optional[str] = None
     exp: Optional[str] = None
@@ -81,30 +83,34 @@ class GenerateRequest(BaseModel):
     save_to_db: bool = True
 
 # ================== PROVIDER LIST ==================
-PROVIDERS = [
-    {"name": "clover", "status": "untested", "last_check": None},
-    {"name": "authorizenet", "status": "untested", "last_check": None},
-    {"name": "paypal", "status": "untested", "last_check": None},
-    {"name": "amazonpay", "status": "untested", "last_check": None},
-]
+PROVIDERS = [{"name": "clover", "status": "untested", "last_check": None}]
 
 PROVIDER_STATS = {p["name"]: {"success": 0, "fail": 0, "total": 0} for p in PROVIDERS}
 PROVIDER_INDEX = 0
 
-# ================== NMI CONFIG ==================
-NMI_CONFIG = {
-    "username": os.getenv("NMI_API_USERNAME", "bygreenllc"),
-    "password": os.getenv("NMI_API_PASSWORD", "Ak1f1987@..."),
-    "api_key": os.getenv("NMI_API_SECURITY_KEY", "v4_secret_4A9387r9Kc44xHm3p2g2V28Qu9t3vb8X"),
-    "url": "https://secure.nmi.com/api/transact.php"
-}
 
-GLOBALPAYMENTS_CONFIG = {
+
+CLOVER_CONFIG = {
     "merchant_id": os.getenv("CLOVER_MERCHANT_ID", "518993421163932"),
     "public_token": os.getenv("CLOVER_PUBLIC_TOKEN", "cc5f1f800dad9399d3e46aca8da49d8f"),
     "private_token": os.getenv("CLOVER_PRIVATE_TOKEN", "c7ee250b-e9ae-ab59-ba52-616ecc63ed29"),
     "token_url": "https://token.clover.com/v1/tokens",
     "charge_url": "https://api.clover.com/v1/charges"
+}
+
+MOCK_MODE = os.getenv("MOCK_MODE", "true").lower() in ["1", "true", "yes", "on"]
+
+NMI_CONFIG = {
+    "username": os.getenv("NMI_USERNAME", ""),
+    "password": os.getenv("NMI_PASSWORD", ""),
+    "url": os.getenv("NMI_URL", "https://secure.nmi.com/api/transact.php")
+}
+
+GLOBALPAYMENTS_CONFIG = {
+    "public_token": os.getenv("GLOBALPAYMENTS_PUBLIC_TOKEN", ""),
+    "private_token": os.getenv("GLOBALPAYMENTS_PRIVATE_TOKEN", ""),
+    "token_url": os.getenv("GLOBALPAYMENTS_TOKEN_URL", "https://api.globalpay.com/v1/tokens"),
+    "charge_url": os.getenv("GLOBALPAYMENTS_CHARGE_URL", "https://api.globalpay.com/v1/charges")
 }
 
 # ================== HELPER FUNCTIONS ==================
@@ -236,47 +242,74 @@ def parse_card_line(line: str) -> Dict:
 class BinLookup:
     def __init__(self):
         self.cache = {}
-        self.binlist_url = "https://lookup.binlist.net/"
+        self.csv_path = Path(__file__).resolve().parent / "bin-data.csv"
+        self.csv_index = None
+        self.csv_mtime = None
+
+    def _load_csv_index(self) -> Dict[str, Dict]:
+        if not self.csv_path.exists():
+            raise FileNotFoundError(f"BIN data file not found: {self.csv_path}")
+
+        mtime = self.csv_path.stat().st_mtime
+        if self.csv_index is not None and self.csv_mtime == mtime:
+            return self.csv_index
+
+        index = {}
+        with self.csv_path.open("r", encoding="utf-8-sig", newline="") as csv_file:
+            reader = csv.DictReader(csv_file)
+            for row in reader:
+                bin_value = digits_only(row.get("BIN"))[:6]
+                if len(bin_value) == 6 and bin_value not in index:
+                    index[bin_value] = row
+
+        self.csv_index = index
+        self.csv_mtime = mtime
+        logger.info(f"[BIN] {len(index)} BIN kaydı bin-data.csv dosyasından yüklendi")
+        return index
+
+    def _row_to_result(self, bin_6: str, row: Dict) -> Dict:
+        category = str(row.get("Category") or "").strip().upper()
+        card_type = str(row.get("Type") or "").strip().upper() or "UNKNOWN"
+        brand = str(row.get("Brand") or "").strip().upper() or "UNKNOWN"
+        issuer = str(row.get("Issuer") or "").strip() or "Unknown"
+        country = str(row.get("isoCode2") or "").strip().upper() or "XX"
+        country_name = str(row.get("CountryName") or "").strip() or "Unknown"
+        level = category or "STANDARD"
+
+        return {
+            "bin": bin_6,
+            "brand": brand,
+            "type": card_type,
+            "level": level,
+            "level_detail": f"{level.title()} Card" if level != "STANDARD" else "Standard Card",
+            "bank": issuer,
+            "issuer_phone": str(row.get("IssuerPhone") or "").strip(),
+            "issuer_url": str(row.get("IssuerUrl") or "").strip(),
+            "country": country,
+            "country_name": country_name,
+            "country_alpha3": str(row.get("isoCode3") or "").strip().upper(),
+            "currency": "USD",
+            "prepaid": "PREPAID" in category,
+            "commercial": any(term in category for term in ["BUSINESS", "CORPORATE", "COMMERCIAL"]),
+            "source": "bin-data.csv",
+            "valid": True
+        }
+
     def get_bin_info(self, bin_number: str) -> Dict:
         bin_6 = digits_only(bin_number)[:6]
         if bin_6 in self.cache:
             return self.cache[bin_6]
         result = {"bin": bin_6, "brand": "UNKNOWN", "type": "UNKNOWN", "level": "STANDARD", "level_detail": "Standard Card", "bank": "Unknown", "country": "XX", "country_name": "Unknown", "currency": "USD", "prepaid": False, "commercial": False, "source": "none", "valid": False}
         try:
-            r = requests.get(f"{self.binlist_url}{bin_6}", timeout=10, headers={"Accept-Version": "3"})
-            if r.status_code == 200:
-                data = r.json()
-                bank = data.get("bank", {})
-                country = data.get("country", {})
-                brand = data.get("scheme", "UNKNOWN").upper()
-                brand_name = data.get("brand", "").upper()
-                level = "STANDARD"
-                level_detail = "Standard Card"
-                if "PLATINUM" in brand_name:
-                    level = "PLATINUM"
-                    level_detail = "Platinum Card"
-                elif "GOLD" in brand_name:
-                    level = "GOLD"
-                    level_detail = "Gold Card"
-                elif "SIGNATURE" in brand_name:
-                    level = "SIGNATURE"
-                    level_detail = "Signature Card"
-                elif "INFINITE" in brand_name:
-                    level = "INFINITE"
-                    level_detail = "Infinite Card"
-                elif "WORLD" in brand_name:
-                    level = "WORLD"
-                    level_detail = "World Card"
-                elif "BUSINESS" in brand_name:
-                    level = "BUSINESS"
-                    level_detail = "Business Card"
-                result.update({"brand": brand, "type": data.get("type", "UNKNOWN").upper(), "level": level, "level_detail": level_detail, "bank": bank.get("name", "Unknown"), "country": country.get("alpha2", "XX"), "country_name": country.get("name", "Unknown"), "currency": country.get("currency", "USD"), "prepaid": data.get("prepaid", False), "commercial": data.get("commercial", False), "source": "binlist.net", "valid": True})
+            row = self._load_csv_index().get(bin_6)
+            if row:
+                result.update(self._row_to_result(bin_6, row))
         except Exception as e:
             logger.warning(f"[BIN] Hata: {e}")
         self.cache[bin_6] = result
         return result
 
-bin_lookup = BinLookup()
+bin_lookup_service = BinLookup()
 
 # ================== ASYNC BIN CHECK ==================
 async def bin_check_card(card_data: Dict) -> Dict:
@@ -284,7 +317,7 @@ async def bin_check_card(card_data: Dict) -> Dict:
     bin_6 = digits_only(pan)[:6]
     if not bin_6 or len(bin_6) < 6:
         return {"status": "failed", "bin": bin_6, "error": "Invalid BIN"}
-    bin_info = bin_lookup.get_bin_info(bin_6)
+    bin_info = bin_lookup_service.get_bin_info(bin_6)
     return {
         "status": "passed" if bin_info.get("valid") else "failed",
         "bin": bin_6,
@@ -612,34 +645,44 @@ async def check_file(file: UploadFile, provider: str = "clover", auth: str = Dep
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def format_bin_lookup_response(bin_info: Dict) -> Dict:
+    return {
+        "bin": bin_info["bin"],
+        "brand": bin_info["brand"],
+        "type": bin_info["type"],
+        "level": bin_info["level"],
+        "level_detail": bin_info["level_detail"],
+        "bank": bin_info["bank"],
+        "issuer_phone": bin_info.get("issuer_phone", ""),
+        "issuer_url": bin_info.get("issuer_url", ""),
+        "country": bin_info["country"],
+        "country_name": bin_info["country_name"],
+        "country_alpha3": bin_info.get("country_alpha3", ""),
+        "currency": bin_info["currency"],
+        "prepaid": bin_info["prepaid"],
+        "commercial": bin_info["commercial"],
+        "source": bin_info["source"],
+        "valid": bin_info["valid"],
+        "timestamp": datetime.now().isoformat()
+    }
+
 @app.post("/bin/lookup")
-async def bin_lookup(request: CardCheckRequest, auth: str = Depends(verify_auth)):
+async def lookup_bin_endpoint(request: CardCheckRequest, auth: str = Depends(verify_auth)):
     try:
-        pan = digits_only(request.pan or request.cardNumber or "")
+        pan = digits_only(request.bin or request.pan or request.cardNumber or "")
         if len(pan) < 6:
             raise HTTPException(status_code=400, detail="Card number must be at least 6 digits")
-        bin_info = bin_lookup.get_bin_info(pan[:6])
-        return {
-            "bin": bin_info["bin"],
-            "brand": bin_info["brand"],
-            "type": bin_info["type"],
-            "level": bin_info["level"],
-            "level_detail": bin_info["level_detail"],
-            "bank": bin_info["bank"],
-            "country": bin_info["country"],
-            "country_name": bin_info["country_name"],
-            "currency": bin_info["currency"],
-            "prepaid": bin_info["prepaid"],
-            "commercial": bin_info["commercial"],
-            "source": bin_info["source"],
-            "valid": bin_info["valid"],
-            "timestamp": datetime.now().isoformat()
-        }
+        bin_info = bin_lookup_service.get_bin_info(pan[:6])
+        return format_bin_lookup_response(bin_info)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[API] BIN lookup hatası: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/checkers/bincheck")
+async def api_bincheck_endpoint(request: CardCheckRequest, auth: str = Depends(verify_auth)):
+    return await lookup_bin_endpoint(request, auth)
 
 # ================== GENERATOR ENDPOINTS ==================
 
