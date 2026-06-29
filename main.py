@@ -3,18 +3,15 @@ STRIPE CARD CHECKER API - TEK DOSYA
 Önce parser'dan geçirir, sonra Stripe ile işleme sokar.
 Sadece API olarak çalışır.
 """
-import re
 import json
 from typing import List, Dict, Optional, Union, Tuple, Any
 from dataclasses import dataclass, field
 import os
 import requests
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, validator
 import uvicorn
-import sys
 
 
 # ============================================
@@ -149,15 +146,6 @@ class CardParser:
             
             # Pipe formatı
             if '|' in data:
-                # Tam pipe formatı (birçok alan var)
-                if len(data.split('|')) > 10:
-                    return CardParser._parse_full_pipe(data)
-                else:
-                    return CardParser._parse_pipe(data)
-            
-            # Sadece kart numarası ve tarih formatı (örn: "4111111111111111|12|25|123")
-            parts = data.split('|')
-            if len(parts) >= 3 and all(p.strip().isdigit() for p in parts[:3] if p.strip()):
                 return CardParser._parse_pipe(data)
         
         return []
@@ -177,9 +165,17 @@ class CardParser:
             
             if len(parts) >= 3:
                 number = parts[0].strip()
-                exp_part = parts[1].strip()
-                cvc = parts[2].strip()
-                
+
+                # Both number|MM/YY|CVC and number|MM|YY|CVC are accepted.
+                if len(parts) >= 4 and parts[1].strip().isdigit() and parts[2].strip().isdigit():
+                    exp_part = f"{parts[1].strip()}/{parts[2].strip()}"
+                    cvc = parts[3].strip()
+                    metadata_offset = 1
+                else:
+                    exp_part = parts[1].strip()
+                    cvc = parts[2].strip()
+                    metadata_offset = 0
+
                 exp_month, exp_year = CardParser._parse_expiration(exp_part)
                 
                 if number and exp_month and exp_year and cvc:
@@ -187,7 +183,19 @@ class CardParser:
                         number=number,
                         exp_month=exp_month,
                         exp_year=exp_year,
-                        cvc=cvc
+                        cvc=cvc,
+                        name=parts[3 + metadata_offset].strip() or "Test User"
+                        if len(parts) > 3 + metadata_offset else "Test User",
+                        phone=parts[9 + metadata_offset].strip()
+                        if len(parts) > 9 + metadata_offset else None,
+                        email=parts[10 + metadata_offset].strip()
+                        if len(parts) > 10 + metadata_offset else None,
+                        dob=parts[11 + metadata_offset].strip()
+                        if len(parts) > 11 + metadata_offset else None,
+                        ip=parts[12 + metadata_offset].strip()
+                        if len(parts) > 12 + metadata_offset else None,
+                        user_agent=parts[13 + metadata_offset].strip()
+                        if len(parts) > 13 + metadata_offset else None,
                     ))
         
         return cards
@@ -717,12 +725,77 @@ async def health_check():
 
 @app.post("/parse")
 async def parse_cards(request: ParseRequest):
-    """
-    Sadece kart verilerini parse et
-    
-    Request body:
-    ```json
-    {
-        "data": "4111111111111111|12|25|123",
-        "return_type": "json"
+    """Parse card input without contacting Stripe."""
+    cards = parse_card_data(request.data)
+    if not cards:
+        raise HTTPException(status_code=400, detail="No valid cards found")
+
+    return {
+        "total": len(cards),
+        "cards": [
+            {
+                "masked": card.get_masked(),
+                "exp_month": card.exp_month,
+                "exp_year": card.exp_year,
+                "name": card.name,
+                "country": card.country,
+            }
+            for card in cards
+        ],
     }
+
+
+def serialize_result(result: ProcessingResult) -> Dict[str, Any]:
+    """Return a stable API response without echoing PAN or CVC."""
+    return {
+        "success": result.success,
+        "status": result.status,
+        "message": result.message,
+        "card": {
+            "masked": result.card.get_masked(),
+            "exp_month": result.card.exp_month,
+            "exp_year": result.card.exp_year,
+        },
+        "setup_intent_id": result.setup_intent_id,
+        "payment_method_id": result.payment_method_id,
+        "requires_action": result.requires_action,
+        "redirect_url": result.redirect_url,
+        "error": result.error,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.post("/check")
+async def check_cards(request: CardCheckRequest):
+    """Parse and check one or more cards using a Stripe test key."""
+    cards = parse_card_data(request.cards)
+    if not cards:
+        raise HTTPException(status_code=400, detail="No valid cards found")
+
+    processor = StripeProcessor(request.stripe_key)
+    results = processor.process_cards(cards, request.customer_id)
+    serialized = [serialize_result(result) for result in results]
+
+    return {
+        "total": len(serialized),
+        "successful": sum(1 for result in results if result.success),
+        "failed": sum(1 for result in results if not result.success),
+        "results": serialized,
+    }
+
+
+@app.post("/check/single")
+async def check_single_card(request: SingleCardCheckRequest):
+    """Parse and check exactly one card using a Stripe test key."""
+    card = parse_card_data_single(request.card)
+    if card is None:
+        raise HTTPException(status_code=400, detail="No valid card found")
+
+    processor = StripeProcessor(request.stripe_key)
+    result = processor.process_card(card, request.customer_id)
+    return serialize_result(result)
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
