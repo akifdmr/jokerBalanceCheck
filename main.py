@@ -1,604 +1,723 @@
-from fastapi import FastAPI, HTTPException, Depends, Security, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, List
-from datetime import datetime
-import requests
+# stripe_card_checker.py
+"""
+STRIPE CARD CHECKER API - TEK DOSYA
+Önce parser'dan geçirir, sonra Stripe ile işleme sokar.
+Sadece API olarak çalışır.
+"""
+
 import os
-import logging
-from pymongo import MongoClient
-from urllib.parse import quote_plus
-import hashlib
-import json
-import random
 import re
+import json
+import requests
+from typing import Dict, List, Optional, Union, Any, Tuple
+from datetime import datetime
+from dataclasses import dataclass, field
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, validator
+import uvicorn
 
-# ================== LOGGING ==================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
-# ================== APP ==================
-app = FastAPI(
-    title="Clover Live Card Checker API",
-    description="Clover ile kart doğrulama ve MongoDB'ye kaydetme",
-    version="2.0.0"
-)
-security = HTTPBearer()
+# ============================================
+# 1. DATA MODELS
+# ============================================
 
-# ================== AUTH ==================
-AUTH_TOKEN = os.getenv("AUTH_TOKEN", "b9f3k7m2v8t3w5z1q6p9c4b7n2v8m2025")
-
-def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
-    if credentials.credentials != AUTH_TOKEN:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Geçersiz token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return credentials.credentials
-
-# ================== MONGODB CONNECTION ==================
-MONGODB_URI = os.getenv("MONGODB_URI", "")
-MONGODB_USER = os.getenv("MONGODB_USER", "")
-MONGODB_PASS = os.getenv("MONGODB_PASS", "")
-MONGODB_DB = os.getenv("MONGODB_DB", "paymentmanger")
-MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "liveCards")
-
-# MongoDB bağlantısını kur
-try:
-    if MONGODB_URI:
-        if MONGODB_USER and MONGODB_PASS:
-            if "mongodb+srv://" in MONGODB_URI:
-                uri_parts = MONGODB_URI.split("://")
-                if len(uri_parts) == 2:
-                    host_part = uri_parts[1].split("/")
-                    if len(host_part) >= 2:
-                        host = host_part[0]
-                        db_name = host_part[1].split("?")[0]
-                        encoded_user = quote_plus(MONGODB_USER)
-                        encoded_pass = quote_plus(MONGODB_PASS)
-                        MONGODB_URI = f"mongodb+srv://{encoded_user}:{encoded_pass}@{host}/{db_name}"
-        
-        client = MongoClient(MONGODB_URI, tls=True, tlsAllowInvalidCertificates=True)
-        db = client[MONGODB_DB]
-        live_cards_collection = db[MONGODB_COLLECTION]
-        
-        # Index oluştur
-        live_cards_collection.create_index("pan", unique=True)
-        live_cards_collection.create_index("transactionId")
-        live_cards_collection.create_index("verifiedAt")
-        
-        logger.info(f"[+] MongoDB bağlantısı başarılı - Database: {MONGODB_DB}, Collection: {MONGODB_COLLECTION}")
-    else:
-        logger.warning("[!] MONGODB_URI environment variable not set - MongoDB devre dışı")
-        client = None
-        db = None
-        live_cards_collection = None
-except Exception as e:
-    logger.error(f"[!] MongoDB hatası: {e}")
-    client = None
-    db = None
-    live_cards_collection = None
-
-# ================== CONFIG ==================
-CLOVER_CONFIG = {
-    "merchant_id": os.getenv("CLOVER_MERCHANT_ID", "518993421163932"),
-    "public_token": os.getenv("CLOVER_PUBLIC_TOKEN", "cc5f1f800dad9399d3e46aca8da49d8f"),
-    "private_token": os.getenv("CLOVER_PRIVATE_TOKEN", "c7ee250b-e9ae-ab59-ba52-616ecc63ed29"),
-    "token_url": "https://token.clover.com/v1/tokens",
-    "charge_url": "https://api.clover.com/v1/charges"
-}
-
-MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() in ["1", "true", "yes", "on"]
-
-# ================== MODELS ==================
-class CardInfo(BaseModel):
-    """Kart bilgileri modeli"""
-    pan: str = Field(..., description="Kart numarası", example="4514011614153896")
-    exp: str = Field(..., description="Son kullanma tarihi (MM/YYYY veya MM/YY)", example="07/2026")
-    cvv: str = Field(..., description="CVV kodu", example="234")
-
-class CardCheckResponse(BaseModel):
-    """Doğrulama sonucu modeli"""
-    status: str = Field(..., description="HTTP durumu: success / error")
-    verified: bool = Field(False, description="Kart doğrulandı mı?")
-    isLive: bool = Field(False, description="Kart live mı?")
-    message: str = Field(..., description="Sonuç mesajı")
-    card: Dict = Field(..., description="Kart bilgileri (maskesiz)")
-    binInfo: Optional[Dict] = Field(None, description="BIN bilgileri")
-    verification: Optional[Dict] = Field(None, description="Doğrulama detayları")
-    dbSaved: bool = Field(False, description="Veritabanına kaydedildi mi?")
-    timestamp: str = Field(..., description="İşlem zamanı")
-
-# ================== HELPER FUNCTIONS ==================
-
-def mask_pan(pan: str) -> str:
-    """PAN'i maskeler"""
-    if not pan or len(pan) < 10:
-        return pan
-    return f"{pan[:6]}****{pan[-4:]}"
-
-def normalize_expiry(exp: str) -> Dict:
-    """Son kullanma tarihini normalize eder"""
-    exp = exp.strip()
-    if '/' not in exp:
-        raise ValueError("Geçersiz tarih formatı (MM/YYYY veya MM/YY)")
+@dataclass
+class CardData:
+    """Standart kart verisi modeli"""
+    number: str
+    exp_month: str
+    exp_year: str
+    cvc: str
+    name: str = "Test User"
+    country: str = "US"
+    zip: str = "00000"
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    ip: Optional[str] = None
     
-    parts = exp.split('/')
-    if len(parts) != 2:
-        raise ValueError("Geçersiz tarih formatı (MM/YYYY veya MM/YY)")
+    def get_masked(self) -> str:
+        return f"{self.number[:4]}****{self.number[-4:]}"
     
-    month = parts[0].strip().zfill(2)
-    year = parts[1].strip()
-    
-    if len(year) == 2:
-        year = f"20{year}"
-    elif len(year) != 4:
-        raise ValueError("Yıl 2 veya 4 haneli olmalı")
-    
-    if not re.match(r'^(0[1-9]|1[0-2])$', month):
-        raise ValueError("Ay 01-12 arasında olmalı")
-    
-    return {"month": month, "year": year, "expiry": f"{month}/{year}"}
-
-def get_bin_info(pan: str) -> Dict:
-    """BIN bilgilerini alır"""
-    try:
-        # BIN lookup yapmak için basit bir cache
-        import requests as req
-        bin_6 = pan[:6]
-        
-        response = req.get(
-            f"https://lookup.binlist.net/{bin_6}",
-            timeout=5,
-            headers={"Accept-Version": "3"}
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            bank = data.get("bank", {})
-            country = data.get("country", {})
-            brand = data.get("scheme", "UNKNOWN").upper()
-            brand_name = data.get("brand", "").upper()
-            card_type = data.get("type", "UNKNOWN").upper()
-            
-            # Level belirleme
-            level = "STANDARD"
-            if "PLATINUM" in brand_name:
-                level = "PLATINUM"
-            elif "GOLD" in brand_name:
-                level = "GOLD"
-            elif "SIGNATURE" in brand_name:
-                level = "SIGNATURE"
-            elif "INFINITE" in brand_name:
-                level = "INFINITE"
-            elif "WORLD" in brand_name:
-                level = "WORLD"
-            elif "BUSINESS" in brand_name:
-                level = "BUSINESS"
-            
-            return {
-                "bin": bin_6,
-                "brand": brand,
-                "type": card_type,
-                "level": level,
-                "bank": bank.get("name", "Unknown"),
-                "country": country.get("alpha2", "XX"),
-                "country_name": country.get("name", "Unknown"),
-                "currency": country.get("currency", "USD"),
-                "valid": True
-            }
-    except Exception as e:
-        logger.warning(f"[BIN] Hata: {e}")
-    
-    return {
-        "bin": pan[:6],
-        "brand": "UNKNOWN",
-        "type": "UNKNOWN",
-        "level": "STANDARD",
-        "bank": "Unknown",
-        "country": "XX",
-        "country_name": "Unknown",
-        "currency": "USD",
-        "valid": False
-    }
-
-# ================== SAVE TO MONGODB ==================
-
-def save_to_mongodb(card_data: Dict, bin_info: Dict, verification: Dict) -> Dict:
-    """
-    Live kartı MongoDB'ye kaydeder
-    """
-    if not live_cards_collection:
-        return {"saved": False, "error": "MongoDB bağlantısı yok"}
-    
-    try:
-        pan = card_data.get("pan", "")
-        expiry = card_data.get("expiry", "")
-        cvv = card_data.get("cvv", "")
-        
-        doc = {
-            "pan": pan,
-            "masked": mask_pan(pan),
-            "expiry": expiry,
-            "cvv": cvv,
-            "holderName": "",  # Boş
-            "zip": "00000",  # Sabit 00000
-            "brand": bin_info.get("brand", "UNKNOWN"),
-            "type": bin_info.get("type", "UNKNOWN"),
-            "level": bin_info.get("level", "STANDARD"),
-            "bank": bin_info.get("bank", "Unknown"),
-            "country": bin_info.get("country", "XX"),
-            "country_name": bin_info.get("country_name", "Unknown"),
-            "currency": bin_info.get("currency", "USD"),
-            "bin": bin_info.get("bin", ""),
-            "transactionId": verification.get("transactionId", ""),
-            "provider": verification.get("provider", "clover"),
-            "status": verification.get("status", "approved"),
-            "isLive": True,
-            "verifiedAt": datetime.now().isoformat(),
-            "raw_data": {
-                "card": card_data,
-                "verification": verification
-            }
-        }
-        
-        # Upsert
-        result = live_cards_collection.update_one(
-            {"pan": pan},
-            {"$set": doc},
-            upsert=True
-        )
-        
-        if result.upserted_id:
-            logger.info(f"[DB] Yeni kart kaydedildi: {mask_pan(pan)}")
-            return {"saved": True, "id": str(result.upserted_id), "action": "inserted"}
-        elif result.modified_count > 0:
-            logger.info(f"[DB] Kart güncellendi: {mask_pan(pan)}")
-            return {"saved": True, "action": "updated"}
-        else:
-            logger.info(f"[DB] Kart zaten mevcut: {mask_pan(pan)}")
-            return {"saved": True, "action": "exists"}
-            
-    except Exception as e:
-        logger.error(f"[DB] Kayıt hatası: {e}")
-        return {"saved": False, "error": str(e)}
-
-# ================== CLOVER VERIFY ==================
-
-def clover_verify_card(card_data: Dict) -> Dict:
-    """
-    Clover API ile kart doğrulama
-    """
-    if MOCK_MODE:
-        is_live = random.random() < 0.15
+    def to_stripe_format(self) -> Dict[str, Any]:
         return {
-            "status": "approved" if is_live else "declined",
-            "transactionId": f"mock_{hashlib.md5(card_data.get('pan', '').encode()).hexdigest()[:16]}",
-            "provider": "clover",
-            "isLive": is_live,
-            "mock": True
+            "number": self.number,
+            "exp_month": self.exp_month,
+            "exp_year": self.exp_year,
+            "cvc": self.cvc,
+            "billing_details": {
+                "name": self.name,
+                "address": {
+                    "line1": "Test Street 123",
+                    "postal_code": self.zip or "00000",
+                    "country": self.country or "US"
+                }
+            }
+        }
+
+
+@dataclass
+class ProcessingResult:
+    """İşlem sonucu modeli"""
+    card: Optional[CardData]
+    success: bool
+    status: str
+    message: str
+    setup_intent_id: Optional[str] = None
+    payment_method_id: Optional[str] = None
+    requires_action: bool = False
+    redirect_url: Optional[str] = None
+    error: Optional[str] = None
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+# ============================================
+# 2. API REQUEST MODELS
+# ============================================
+
+class CardCheckRequest(BaseModel):
+    """API'ye gelen kart kontrol isteği"""
+    number: str = Field(..., description="Kart numarası")
+    exp_month: str = Field(..., description="Son kullanma ayı")
+    exp_year: str = Field(..., description="Son kullanma yılı")
+    cvc: str = Field(..., description="CVC kodu")
+    name: Optional[str] = Field("Test User", description="Kart sahibi adı")
+    country: Optional[str] = Field("US", description="Ülke kodu")
+    zip: Optional[str] = Field("00000", description="Posta kodu")
+    email: Optional[str] = Field(None, description="Email")
+    phone: Optional[str] = Field(None, description="Telefon")
+    ip: Optional[str] = Field(None, description="IP")
+    customer_id: Optional[str] = Field(None, description="Müşteri ID")
+    
+    @validator('number')
+    def clean_number(cls, v):
+        v = re.sub(r'[\s\-]', '', str(v))
+        if not v.isdigit() or len(v) < 13 or len(v) > 19:
+            raise ValueError("Geçersiz kart numarası")
+        return v
+    
+    @validator('exp_month')
+    def format_month(cls, v):
+        v = str(v).strip()
+        if len(v) == 1:
+            v = f"0{v}"
+        if not v.isdigit() or int(v) < 1 or int(v) > 12:
+            raise ValueError("Geçersiz ay")
+        return v
+    
+    @validator('exp_year')
+    def format_year(cls, v):
+        v = str(v).strip()
+        if len(v) == 4:
+            v = v[-2:]
+        if not v.isdigit() or int(v) < 0 or int(v) > 99:
+            raise ValueError("Geçersiz yıl")
+        return v
+    
+    @validator('cvc')
+    def validate_cvc(cls, v):
+        v = str(v).strip()
+        if not v.isdigit() or len(v) < 3 or len(v) > 4:
+            raise ValueError("CVC 3-4 haneli olmalı")
+        return v
+
+
+class BatchCheckRequest(BaseModel):
+    """Toplu kart kontrol isteği"""
+    cards: List[CardCheckRequest] = Field(..., description="Kart listesi")
+
+
+class ParseAndCheckRequest(BaseModel):
+    """Parse et ve kontrol et isteği"""
+    data: Any = Field(..., description="Herhangi bir formatta kart verisi")
+    customer_id: Optional[str] = Field(None, description="Müşteri ID")
+
+
+# ============================================
+# 3. CARD PARSER
+# ============================================
+
+class CardParser:
+    """Farklı formatlardaki kart verilerini parse eden sınıf"""
+    
+    @staticmethod
+    def parse(data: Union[str, List, Dict]) -> List[CardData]:
+        """Ana parse fonksiyonu - otomatik format tespiti"""
+        if isinstance(data, (list, dict)):
+            return CardParser._parse_json(data)
+        
+        if isinstance(data, str):
+            data = data.strip()
+            
+            # JSON string kontrolü
+            if data.startswith('[') or data.startswith('{'):
+                try:
+                    json_data = json.loads(data)
+                    return CardParser._parse_json(json_data)
+                except:
+                    pass
+            
+            # Pipe formatı
+            if '|' in data:
+                if len(data.split('|')) > 10:
+                    return CardParser._parse_full_pipe(data)
+                else:
+                    return CardParser._parse_pipe(data)
+        
+        return []
+    
+    @staticmethod
+    def _parse_pipe(data: str) -> List[CardData]:
+        cards = []
+        lines = data.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            parts = line.split('|')
+            if len(parts) >= 3:
+                number = parts[0].strip()
+                exp_part = parts[1].strip()
+                cvc = parts[2].strip()
+                exp_month, exp_year = CardParser._parse_expiration(exp_part)
+                
+                if number and exp_month and exp_year and cvc:
+                    cards.append(CardData(
+                        number=number,
+                        exp_month=exp_month,
+                        exp_year=exp_year,
+                        cvc=cvc
+                    ))
+        
+        return cards
+    
+    @staticmethod
+    def _parse_full_pipe(data: str) -> List[CardData]:
+        cards = []
+        lines = data.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            parts = line.split('|')
+            if len(parts) >= 3:
+                number = parts[0].strip() if parts[0] else None
+                exp_part = parts[1].strip() if len(parts) > 1 else None
+                cvc = parts[2].strip() if len(parts) > 2 else None
+                name = parts[3].strip() if len(parts) > 3 and parts[3] else "Test User"
+                email = parts[10].strip() if len(parts) > 10 else None
+                phone = parts[9].strip() if len(parts) > 9 else None
+                ip = parts[12].strip() if len(parts) > 12 else None
+                
+                if number and exp_part and cvc:
+                    exp_month, exp_year = CardParser._parse_expiration(exp_part)
+                    if exp_month and exp_year:
+                        cards.append(CardData(
+                            number=number,
+                            exp_month=exp_month,
+                            exp_year=exp_year,
+                            cvc=cvc,
+                            name=name,
+                            email=email,
+                            phone=phone,
+                            ip=ip
+                        ))
+        
+        return cards
+    
+    @staticmethod
+    def _parse_json(data: Union[List, Dict]) -> List[CardData]:
+        cards = []
+        if not isinstance(data, list):
+            data = [data]
+        
+        for item in data:
+            card_data = CardParser._extract_from_json_item(item)
+            if card_data:
+                cards.append(card_data)
+        
+        return cards
+    
+    @staticmethod
+    def _parse_expiration(exp_str: str) -> Tuple[Optional[str], Optional[str]]:
+        exp_str = exp_str.strip()
+        
+        separators = ['/', '-', '|', ' ']
+        for sep in separators:
+            if sep in exp_str:
+                parts = exp_str.split(sep)
+                if len(parts) == 2:
+                    month = parts[0].strip()
+                    year = parts[1].strip()
+                    
+                    if len(month) == 1:
+                        month = f"0{month}"
+                    if len(year) == 4:
+                        year = year[-2:]
+                    
+                    if month.isdigit() and year.isdigit():
+                        return month, year
+        
+        if exp_str.isdigit() and len(exp_str) == 4:
+            return exp_str[:2], exp_str[2:]
+        
+        return None, None
+    
+    @staticmethod
+    def _extract_from_json_item(item: Dict) -> Optional[CardData]:
+        # Format 1: Direct fields
+        if 'number' in item:
+            number = item['number']
+            exp_month = item.get('exp_month') or item.get('month')
+            exp_year = item.get('exp_year') or item.get('year')
+            cvc = item.get('cvc') or item.get('cvv') or item.get('CVV')
+            
+            if number and exp_month and exp_year and cvc:
+                return CardData(
+                    number=str(number),
+                    exp_month=str(exp_month),
+                    exp_year=str(exp_year),
+                    cvc=str(cvc)
+                )
+        
+        # Format 2: CreditCard wrapper
+        if 'CreditCard' in item:
+            cc = item['CreditCard']
+            number = cc.get('CardNumber') or cc.get('number')
+            exp = cc.get('Exp') or cc.get('exp') or cc.get('expiration')
+            cvc = cc.get('CVV') or cc.get('cvv') or cc.get('cvc')
+            
+            if number and exp and cvc:
+                exp_month, exp_year = CardParser._parse_expiration(str(exp))
+                if exp_month and exp_year:
+                    return CardData(
+                        number=str(number),
+                        exp_month=exp_month,
+                        exp_year=exp_year,
+                        cvc=str(cvc)
+                    )
+        
+        return None
+
+
+# ============================================
+# 4. STRIPE PROCESSOR
+# ============================================
+
+class StripeProcessor:
+    """Stripe API işlemleri"""
+    
+    def __init__(self, secret_key: str):
+        self.secret_key = secret_key
+        self.base_url = "https://api.stripe.com/v1"
+        self.headers = {
+            "Authorization": f"Bearer {self.secret_key}",
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        self.is_test_mode = secret_key.startswith("sk_test_")
+    
+    def create_setup_intent(self, customer_id: Optional[str] = None) -> Dict[str, Any]:
+        """SetupIntent oluştur"""
+        url = f"{self.base_url}/setup_intents"
+        data = {"payment_method_types[]": "card"}
+        if customer_id:
+            data["customer"] = customer_id
+        
+        response = requests.post(url, data=data, headers=self.headers)
+        if response.status_code != 200:
+            error = response.json().get('error', {}).get('message', 'Unknown error')
+            raise Exception(f"SetupIntent creation failed: {error}")
+        return response.json()
+    
+    def confirm_setup_intent(self, setup_id: str, client_secret: str, card: CardData) -> Dict[str, Any]:
+        """SetupIntent'i kart ile onayla"""
+        url = f"{self.base_url}/setup_intents/{setup_id}/confirm"
+        
+        data = {
+            "return_url": "https://example.com/return",
+            "use_stripe_sdk": "true",
+            "client_secret": client_secret,
+            "payment_method_data[billing_details][name]": card.name,
+            "payment_method_data[billing_details][address][postal_code]": card.zip or "00000",
+            "payment_method_data[billing_details][address][country]": card.country,
+            "payment_method_data[type]": "card",
+            "payment_method_data[card][number]": card.number,
+            "payment_method_data[card][cvc]": card.cvc,
+            "payment_method_data[card][exp_year]": card.exp_year,
+            "payment_method_data[card][exp_month]": card.exp_month,
+            "payment_method_data[allow_redisplay]": "unspecified",
+            "payment_method_data[pasted_fields]": "number",
+            "expected_payment_method_type": "card",
+        }
+        
+        response = requests.post(url, data=data, headers=self.headers)
+        return {
+            "status_code": response.status_code,
+            "data": response.json() if response.text else {}
         }
     
-    try:
-        pan = card_data.get("pan", "")
-        month = card_data.get("month", "")
-        year = card_data.get("year", "")
-        cvv = card_data.get("cvv", "")
-        
-        # Tokenization
-        token_payload = {
-            "card": {
-                "number": pan,
-                "exp_month": int(month),
-                "exp_year": int(year),
-                "cvv": cvv
-            }
-        }
-        
-        token_headers = {
-            "Content-Type": "application/json",
-            "apikey": CLOVER_CONFIG["public_token"]
-        }
-        
-        token_response = requests.post(
-            CLOVER_CONFIG["token_url"],
-            json=token_payload,
-            headers=token_headers,
-            timeout=15
-        )
-        
-        if token_response.status_code != 200:
-            return {
-                "status": "error",
-                "isLive": False,
-                "error": f"Tokenization failed: HTTP {token_response.status_code}"
-            }
-        
-        token_data = token_response.json()
-        token_id = token_data.get("id")
-        
-        if not token_id:
-            return {
-                "status": "error",
-                "isLive": False,
-                "error": "No token received"
-            }
-        
-        # Charge (Authorization) - amount 0 ile test
-        charge_payload = {
-            "amount": 0,  # 0.00 USD - sadece yetkilendirme
-            "currency": "usd",
-            "source": token_id,
-            "capture": True  # capture true olsun
-        }
-        
-        charge_headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {CLOVER_CONFIG['private_token']}"
-        }
-        
-        charge_response = requests.post(
-            CLOVER_CONFIG["charge_url"],
-            json=charge_payload,
-            headers=charge_headers,
-            timeout=20
-        )
-        
-        # 200 veya 201 başarılı demek
-        if charge_response.status_code in [200, 201, 202]:
-            charge_data = charge_response.json()
-            charge_status = charge_data.get("status")
+    def process_card(self, card: CardData, customer_id: Optional[str] = None) -> ProcessingResult:
+        """Tek bir kartı Stripe ile doğrula"""
+        try:
+            if not self.is_test_mode:
+                return ProcessingResult(
+                    card=card,
+                    success=False,
+                    status="error",
+                    message="Live keys cannot be used for testing",
+                    error="Please use test keys (sk_test_)"
+                )
             
-            # "succeeded", "approved", "authorized" live
-            is_live = charge_status in ["succeeded", "approved", "authorized"]
+            # 1. SetupIntent oluştur
+            setup_intent = self.create_setup_intent(customer_id)
+            setup_id = setup_intent["id"]
+            client_secret = setup_intent["client_secret"]
             
-            return {
-                "status": "approved" if is_live else "declined",
-                "transactionId": charge_data.get("id", ""),
-                "provider": "clover",
-                "isLive": is_live,
-                "token": token_id,
-                "charge_data": charge_data
-            }
-        else:
-            # 402, 404 vb. hatalar dead
-            return {
-                "status": "declined",
-                "isLive": False,
-                "error": f"Charge failed: HTTP {charge_response.status_code}",
-                "charge_response": charge_response.text[:200]
-            }
+            # 2. SetupIntent'i onayla
+            result = self.confirm_setup_intent(setup_id, client_secret, card)
             
-    except Exception as e:
-        logger.error(f"[CLOVER] Hata: {e}")
-        return {
-            "status": "error",
-            "isLive": False,
-            "error": str(e)
-        }
-
-# ================== CARD CHECK FUNCTION ==================
-
-def check_card(request: CardInfo) -> CardCheckResponse:
-    """
-    Kart doğrulama ana fonksiyonu
-    """
-    try:
-        # Kart bilgilerini normalize et
-        pan = request.pan.strip()
-        
-        # Expiry normalize et
-        expiry_info = normalize_expiry(request.exp)
-        month = expiry_info["month"]
-        year = expiry_info["year"]
-        expiry = expiry_info["expiry"]
-        
-        cvv = request.cvv.strip()
-        
-        # CVV kontrolü
-        if len(cvv) < 3 or len(cvv) > 4:
-            return CardCheckResponse(
+            if result["status_code"] == 200:
+                data = result["data"]
+                status = data.get("status")
+                
+                if status == "succeeded":
+                    return ProcessingResult(
+                        card=card,
+                        success=True,
+                        status=status,
+                        message="Card verified successfully",
+                        setup_intent_id=setup_id,
+                        payment_method_id=data.get("payment_method")
+                    )
+                elif status == "requires_action":
+                    next_action = data.get("next_action", {})
+                    redirect_data = next_action.get("redirect_to_url", {})
+                    
+                    return ProcessingResult(
+                        card=card,
+                        success=False,
+                        status=status,
+                        message="3D Secure authentication required",
+                        requires_action=True,
+                        redirect_url=redirect_data.get("url"),
+                        setup_intent_id=setup_id
+                    )
+                else:
+                    return ProcessingResult(
+                        card=card,
+                        success=False,
+                        status=status,
+                        message=f"Unexpected status: {status}",
+                        setup_intent_id=setup_id
+                    )
+            else:
+                error_data = result["data"].get("error", {})
+                return ProcessingResult(
+                    card=card,
+                    success=False,
+                    status=f"error_{result['status_code']}",
+                    message="Card verification failed",
+                    error=f"{error_data.get('type')}: {error_data.get('message')}"
+                )
+                
+        except Exception as e:
+            return ProcessingResult(
+                card=card,
+                success=False,
                 status="error",
-                verified=False,
-                isLive=False,
-                message="CVV 3 veya 4 haneli olmalı",
-                card={"pan": pan, "expiry": expiry, "cvv": cvv},
-                binInfo=None,
-                verification=None,
-                dbSaved=False,
-                timestamp=datetime.now().isoformat()
+                message="Processing error",
+                error=str(e)
             )
-        
-        # Kart verisini hazırla
-        card_data = {
-            "pan": pan,
-            "month": month,
-            "year": year,
-            "cvv": cvv,
-            "expiry": expiry
-        }
-        
-        # Card response için (maskesiz)
-        card_response = {
-            "pan": pan,
-            "expiry": expiry,
-            "cvv": cvv
-        }
-        
-        # Clover ile doğrula
-        verification = clover_verify_card(card_data)
-        is_live = verification.get("isLive", False)
-        
-        if is_live:
-            # BIN bilgilerini al
-            bin_info = get_bin_info(pan)
-            
-            # DB'ye kaydet
-            save_result = save_to_mongodb(card_data, bin_info, verification)
-            
-            return CardCheckResponse(
-                status="success",
-                verified=True,
-                isLive=True,
-                message="Kart doğrulandı ve live olarak kaydedildi",
-                card=card_response,  # Maskesiz
-                binInfo=bin_info,
-                verification=verification,
-                dbSaved=save_result.get("saved", False),
-                timestamp=datetime.now().isoformat()
-            )
-        else:
-            error_msg = verification.get('error', 'Doğrulama başarısız')
-            return CardCheckResponse(
-                status="success",
-                verified=False,
-                isLive=False,
-                message=f"Kart geçersiz: {error_msg}",
-                card=card_response,
-                binInfo=None,
-                verification=verification,
-                dbSaved=False,
-                timestamp=datetime.now().isoformat()
-            )
-            
-    except ValueError as e:
-        return CardCheckResponse(
-            status="error",
-            verified=False,
-            isLive=False,
-            message=str(e),
-            card={"pan": request.pan, "exp": request.exp, "cvv": request.cvv},
-            binInfo=None,
-            verification=None,
-            dbSaved=False,
-            timestamp=datetime.now().isoformat()
-        )
-    except Exception as e:
-        logger.error(f"[CHECK] Hata: {e}")
-        return CardCheckResponse(
-            status="error",
-            verified=False,
-            isLive=False,
-            message=f"İşlem hatası: {str(e)}",
-            card={"pan": request.pan, "exp": request.exp, "cvv": request.cvv},
-            binInfo=None,
-            verification=None,
-            dbSaved=False,
-            timestamp=datetime.now().isoformat()
-        )
+    
+    def process_cards(self, cards: List[CardData], customer_id: Optional[str] = None) -> List[ProcessingResult]:
+        """Birden fazla kartı Stripe ile doğrula"""
+        results = []
+        for card in cards:
+            result = self.process_card(card, customer_id)
+            results.append(result)
+        return results
 
-# ================== API ENDPOINTS ==================
+
+# ============================================
+# 5. FASTAPI APP
+# ============================================
+
+app = FastAPI(
+    title="Stripe Card Checker API",
+    description="Önce parser'dan geçirir, sonra Stripe ile doğrular",
+    version="1.0.0"
+)
+
+stripe_processor: Optional[StripeProcessor] = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    global stripe_processor
+    secret_key = os.environ.get("STRIPE_SECRET_KEY", "sk_test_...")
+    stripe_processor = StripeProcessor(secret_key)
+    
+    print("="*60)
+    print("🚀 STRIPE CARD CHECKER API")
+    print("="*60)
+    print(f"🔑 Key: {secret_key[:10]}...")
+    print(f"📝 Mode: {'TEST' if secret_key.startswith('sk_test_') else 'LIVE'}")
+    print("="*60)
+
 
 @app.get("/")
 async def root():
     return {
-        "name": "Clover Live Card Checker API",
-        "version": "2.0.0",
-        "status": "active",
-        "mock_mode": MOCK_MODE,
-        "mongodb_connected": live_cards_collection is not None,
-        "endpoints": [
-            {"path": "/", "method": "GET", "description": "API bilgileri"},
-            {"path": "/docs", "method": "GET", "description": "Swagger dokümantasyonu"},
-            {"path": "/health", "method": "GET", "description": "Sağlık kontrolü"},
-            {"path": "/verify", "method": "POST", "description": "Kart doğrulama"},
-            {"path": "/cards/live", "method": "GET", "description": "Live kartları listele"},
-            {"path": "/cards/stats", "method": "GET", "description": "Live kart istatistikleri"}
-        ]
+        "service": "Stripe Card Checker API",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "/check": "POST - Tek kart kontrolü",
+            "/batch-check": "POST - Toplu kart kontrolü",
+            "/parse-and-check": "POST - Parse et ve kontrol et",
+            "/parse": "POST - Sadece parse et (doğrulama yok)",
+            "/health": "GET - Sağlık kontrolü"
+        }
     }
+
 
 @app.get("/health")
-async def health_check():
+async def health():
+    if stripe_processor is None:
+        return JSONResponse(status_code=503, content={"status": "unhealthy", "error": "Stripe not configured"})
+    return {"status": "healthy", "mode": "test" if stripe_processor.is_test_mode else "live"}
+
+
+# ============================================
+# 6. ENDPOINT: /check - Tek kart kontrolü
+# ============================================
+
+@app.post("/check")
+async def check_card(request: CardCheckRequest):
+    """
+    Tek bir kartı doğrula
+    
+    Önce CardCheckRequest'ten CardData'ya çevirir, sonra Stripe ile doğrular.
+    """
+    if stripe_processor is None:
+        raise HTTPException(status_code=503, detail="Stripe not configured")
+    
+    # Request'ten CardData oluştur
+    card = CardData(
+        number=request.number,
+        exp_month=request.exp_month,
+        exp_year=request.exp_year,
+        cvc=request.cvc,
+        name=request.name or "Test User",
+        country=request.country or "US",
+        zip=request.zip or "00000",
+        email=request.email,
+        phone=request.phone,
+        ip=request.ip
+    )
+    
+    # Stripe ile doğrula
+    result = stripe_processor.process_card(card, request.customer_id)
+    
     return {
-        "status": "healthy",
-        "mock_mode": MOCK_MODE,
-        "mongodb": live_cards_collection is not None,
-        "timestamp": datetime.now().isoformat()
+        "success": result.success,
+        "status": result.status,
+        "message": result.message,
+        "card": {
+            "masked": card.get_masked(),
+            "exp": f"{card.exp_month}/{card.exp_year}"
+        },
+        "requires_action": result.requires_action,
+        "redirect_url": result.redirect_url,
+        "setup_intent_id": result.setup_intent_id,
+        "payment_method_id": result.payment_method_id,
+        "error": result.error,
+        "timestamp": result.timestamp
     }
 
-@app.post("/verify", response_model=CardCheckResponse)
-async def verify_card(
-    request: CardInfo,
-    auth: str = Depends(verify_auth)
-):
-    """
-    Kart doğrulama endpoint'i
-    
-    Sadece pan, exp (MM/YYYY veya MM/YY), cvv gönderilir.
-    holderName ve address boş, zip 00000 olarak otomatik doldurulur.
-    Live ise isLive: true ve maskesiz kart bilgileri döner.
-    """
-    try:
-        result = check_card(request)
-        return result
-    except Exception as e:
-        logger.error(f"[API] Hata: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/cards/live")
-async def list_live_cards(
-    limit: int = 50,
-    auth: str = Depends(verify_auth)
-):
-    """
-    Live kartları listele (maskeli)
-    """
-    if not live_cards_collection:
-        raise HTTPException(status_code=503, detail="MongoDB bağlantısı yok")
-    
-    try:
-        cursor = live_cards_collection.find(
-            {"isLive": True}
-        ).sort("verifiedAt", -1).limit(limit)
-        
-        cards = []
-        for doc in cursor:
-            doc["_id"] = str(doc["_id"])
-            if "cvv" in doc:
-                doc["cvv"] = "***"
-            if "pan" in doc:
-                doc["pan"] = mask_pan(doc["pan"])
-            cards.append(doc)
-        
-        return {"total": len(cards), "cards": cards}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# ============================================
+# 7. ENDPOINT: /batch-check - Toplu kart kontrolü
+# ============================================
 
-@app.get("/cards/stats")
-async def card_statistics(
-    auth: str = Depends(verify_auth)
-):
+@app.post("/batch-check")
+async def batch_check(request: BatchCheckRequest):
     """
-    Live kart istatistikleri
-    """
-    if not live_cards_collection:
-        raise HTTPException(status_code=503, detail="MongoDB bağlantısı yok")
+    Birden fazla kartı toplu olarak doğrula
     
-    try:
-        total = live_cards_collection.count_documents({"isLive": True})
-        
-        brand_stats = live_cards_collection.aggregate([
-            {"$match": {"isLive": True}},
-            {"$group": {"_id": "$brand", "count": {"$sum": 1}}}
-        ])
-        
-        brands = {}
-        for item in brand_stats:
-            brands[item["_id"]] = item["count"]
-        
-        return {
-            "totalLiveCards": total,
-            "brands": brands,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    Her kart önce CardData'ya çevrilir, sonra Stripe ile doğrulanır.
+    """
+    if stripe_processor is None:
+        raise HTTPException(status_code=503, detail="Stripe not configured")
+    
+    cards = []
+    for req in request.cards:
+        card = CardData(
+            number=req.number,
+            exp_month=req.exp_month,
+            exp_year=req.exp_year,
+            cvc=req.cvc,
+            name=req.name or "Test User",
+            country=req.country or "US",
+            zip=req.zip or "00000",
+            email=req.email,
+            phone=req.phone,
+            ip=req.ip
+        )
+        cards.append(card)
+    
+    # Stripe ile doğrula
+    results = stripe_processor.process_cards(cards)
+    
+    response = []
+    for i, result in enumerate(results):
+        response.append({
+            "index": i,
+            "card": {
+                "masked": cards[i].get_masked(),
+                "exp": f"{cards[i].exp_month}/{cards[i].exp_year}"
+            },
+            "success": result.success,
+            "status": result.status,
+            "message": result.message,
+            "requires_action": result.requires_action,
+            "redirect_url": result.redirect_url,
+            "setup_intent_id": result.setup_intent_id,
+            "error": result.error,
+            "timestamp": result.timestamp
+        })
+    
+    return {
+        "total": len(results),
+        "successful": sum(1 for r in results if r.success),
+        "failed": sum(1 for r in results if not r.success),
+        "results": response
+    }
+
+
+# ============================================
+# 8. ENDPOINT: /parse-and-check - Parse et ve kontrol et
+# ============================================
+
+@app.post("/parse-and-check")
+async def parse_and_check(request: ParseAndCheckRequest):
+    """
+    Herhangi bir formattaki kart verisini önce parse eder, sonra Stripe ile doğrular
+    
+    Desteklenen formatlar:
+    - Pipe: 4242424242424242|12/28|123
+    - JSON: {"number": "4242...", "month": "12", "year": "2028", "cvv": "123"}
+    - CreditCard: {"CreditCard": {"CardNumber": "...", "Exp": "12/2028", "CVV": "123"}}
+    - Full pipe: card|exp|cvv|name||||||phone|email|ip|useragent
+    """
+    if stripe_processor is None:
+        raise HTTPException(status_code=503, detail="Stripe not configured")
+    
+    # 1. PARSE ET
+    cards = CardParser.parse(request.data)
+    
+    if not cards:
+        raise HTTPException(status_code=400, detail="No valid cards found in the input data")
+    
+    # 2. STRIPE İLE DOĞRULA
+    results = stripe_processor.process_cards(cards, request.customer_id)
+    
+    # 3. CEVAP OLUŞTUR
+    response = []
+    for i, (card, result) in enumerate(zip(cards, results)):
+        response.append({
+            "index": i,
+            "original_card": {
+                "masked": card.get_masked(),
+                "exp_month": card.exp_month,
+                "exp_year": card.exp_year,
+                "cvc": card.cvc,
+                "name": card.name
+            },
+            "success": result.success,
+            "status": result.status,
+            "message": result.message,
+            "requires_action": result.requires_action,
+            "redirect_url": result.redirect_url,
+            "setup_intent_id": result.setup_intent_id,
+            "payment_method_id": result.payment_method_id,
+            "error": result.error,
+            "timestamp": result.timestamp
+        })
+    
+    return {
+        "total": len(results),
+        "successful": sum(1 for r in results if r.success),
+        "failed": sum(1 for r in results if not r.success and not r.requires_action),
+        "requires_action": sum(1 for r in results if r.requires_action),
+        "results": response
+    }
+
+
+# ============================================
+# 9. ENDPOINT: /parse - Sadece parse et (doğrulama yok)
+# ============================================
+
+@app.post("/parse")
+async def parse_only(request: ParseAndCheckRequest):
+    """
+    Sadece kart verilerini parse et, Stripe ile doğrulama YAPMAZ
+    
+    Hangi formatta geldiğini görmek için kullanılır.
+    """
+    cards = CardParser.parse(request.data)
+    
+    if not cards:
+        raise HTTPException(status_code=400, detail="No valid cards found")
+    
+    response = []
+    for i, card in enumerate(cards):
+        response.append({
+            "index": i,
+            "card": {
+                "number": card.number,
+                "masked": card.get_masked(),
+                "exp_month": card.exp_month,
+                "exp_year": card.exp_year,
+                "cvc": card.cvc,
+                "name": card.name,
+                "country": card.country,
+                "zip": card.zip,
+                "email": card.email,
+                "phone": card.phone,
+                "ip": card.ip
+            }
+        })
+    
+    return {
+        "total": len(cards),
+        "parsed_cards": response
+    }
+
+
+# ============================================
+# 10. RUN
+# ============================================
 
 if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    print("="*60)
+    print("🚀 STRIPE CARD CHECKER API")
+    print("="*60)
+    print("⚠️  UYARI: SADECE TEST KEY KULLANIN!")
+    print("   Test key: sk_test_...")
+    print("   export STRIPE_SECRET_KEY=sk_test_...")
+    print("="*60)
+    print()
+    print("📌 ENDPOINTLER:")
+    print("   POST /check              - Tek kart kontrolü")
+    print("   POST /batch-check        - Toplu kart kontrolü")
+    print("   POST /parse-and-check    - Parse et + kontrol et")
+    print("   POST /parse              - Sadece parse et")
+    print("   GET  /health             - Sağlık kontrolü")
+    print("="*60)
+    
+    uvicorn.run(app, host="0.0.0.0", port=8000)
