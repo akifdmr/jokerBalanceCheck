@@ -1,6 +1,6 @@
 """
-STRIPE CARD CHECKER API - CANLI ANAHTAR DESTEKLİ
-Parser + Stripe işleme, test/canlı ayrımı yok.
+STRIPE CARD CHECKER API - CANLI ANAHTAR SABİT
+Parser + Stripe işleme, .env değişkenleri koda gömüldü.
 """
 import json
 from typing import List, Dict, Optional, Union, Tuple, Any, Literal
@@ -12,6 +12,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import AnyHttpUrl, BaseModel, Field
 import uvicorn
+
+# ============================================
+# 0. SABİT ANAHTARLAR (Gömülü)
+# ============================================
+
+STRIPE_SECRET_KEY = "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"
+STRIPE_PUBLISHABLE_KEY = "pk_live_51RwD60JJOZ1i4ld726PusbRNr1p5bASCsfap788jHdetIntqP5nRigWCf3VWgR68hv3pbYHzG1iYdomoIun8xtT000SpmazmtJ"
 
 # ============================================
 # 1. DATA MODELS
@@ -68,12 +75,11 @@ class ProcessingResult:
 
 
 # ============================================
-# 2. API REQUEST MODELS (Validasyon YOK)
+# 2. API REQUEST MODELS (stripe_key alanları yok)
 # ============================================
 
 class CardCheckRequest(BaseModel):
     cards: Union[str, List[Dict], Dict] = Field(..., description="Kart verileri")
-    stripe_key: str = Field(..., description="Stripe secret key (sk_test_ veya sk_live_)")
     customer_id: Optional[str] = Field(None)
 
 
@@ -84,20 +90,17 @@ class ParseRequest(BaseModel):
 
 class SingleCardCheckRequest(BaseModel):
     card: Union[str, Dict] = Field(...)
-    stripe_key: str = Field(..., description="Stripe secret key (sk_test_ veya sk_live_)")
     customer_id: Optional[str] = Field(None)
 
 
 class ThreeDSAuthRequest(BaseModel):
     card: Union[str, Dict] = Field(...)
-    stripe_key: str = Field(..., description="Stripe secret key")
     return_url: AnyHttpUrl = Field(...)
     customer_id: Optional[str] = Field(None)
     mode: Literal["automatic", "any", "challenge"] = Field("automatic")
 
 
 class RawThreeDS2AuthenticateRequest(BaseModel):
-    publishable_key: str = Field(...)
     payload: Dict[str, Any] = Field(...)
 
 
@@ -291,12 +294,12 @@ def parse_card_data_single(data: Union[str, Dict]) -> Optional[CardData]:
 
 
 # ============================================
-# 4. STRIPE PROCESSOR (Test kontrolü YOK)
+# 4. STRIPE PROCESSOR (sabit anahtar kullanır)
 # ============================================
 
 class StripeProcessor:
-    def __init__(self, secret_key: str):
-        self.secret_key = secret_key
+    def __init__(self):
+        self.secret_key = STRIPE_SECRET_KEY
         self.base_url = "https://api.stripe.com/v1"
         self.headers = {
             "Authorization": f"Bearer {self.secret_key}",
@@ -422,9 +425,9 @@ class StripeProcessor:
             return {"success": False, "status": "error", "payment_method_id": payment_method_id, "error": str(exc)}
 
     @staticmethod
-    def authenticate_3ds2_raw(publishable_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def authenticate_3ds2_raw(payload: Dict[str, Any]) -> Dict[str, Any]:
         form_data = dict(payload)
-        form_data["key"] = publishable_key
+        form_data["key"] = STRIPE_PUBLISHABLE_KEY
         headers = {
             "Accept": "application/json",
             "Accept-Language": "en-US,en;q=0.9",
@@ -553,16 +556,16 @@ class StripeProcessor:
 
 app = FastAPI(
     title="Stripe Card Checker API",
-    description="Live key supported - no restrictions",
-    version="2.0.0"
+    description="Live key embedded - no .env needed",
+    version="2.1.0"
 )
 
 
 @app.get("/")
 async def root():
     return {
-        "message": "Stripe Card Checker API - Live Mode",
-        "version": "2.0.0",
+        "message": "Stripe Card Checker API - Live Mode (Embedded Key)",
+        "version": "2.1.0",
         "endpoints": {
             "/": "Info",
             "/health": "Health check",
@@ -625,7 +628,7 @@ async def check_cards(request: CardCheckRequest):
     cards = parse_card_data(request.cards)
     if not cards:
         raise HTTPException(status_code=400, detail="No valid cards found")
-    processor = StripeProcessor(request.stripe_key)
+    processor = StripeProcessor()
     results = processor.process_cards(cards, request.customer_id)
     serialized = [serialize_result(result) for result in results]
     return {
@@ -641,9 +644,8 @@ async def check_single_card(request: SingleCardCheckRequest):
     card = parse_card_data_single(request.card)
     if card is None:
         raise HTTPException(status_code=400, detail="No valid card found")
-    processor = StripeProcessor(request.stripe_key)
+    processor = StripeProcessor()
     result = processor.process_card(card, request.customer_id)
-    # Plain text format: pan|exp_month|exp_year|cvv|status
     status = "Live" if result.success else ("3D" if result.requires_action else "Dead")
     return PlainTextResponse(
         f"{card.number}|{card.exp_month}|{card.exp_year}|{card.cvc}|{status}"
@@ -655,7 +657,7 @@ async def authenticate_3ds(request: ThreeDSAuthRequest):
     card = parse_card_data_single(request.card)
     if card is None:
         raise HTTPException(status_code=400, detail="No valid card found")
-    processor = StripeProcessor(request.stripe_key)
+    processor = StripeProcessor()
     result = processor.authenticate_3ds(
         card=card,
         return_url=str(request.return_url),
@@ -673,10 +675,7 @@ async def authenticate_3ds(request: ThreeDSAuthRequest):
 
 @app.post("/auth/3ds2/authenticate")
 async def authenticate_3ds2_raw(request: RawThreeDS2AuthenticateRequest):
-    result = StripeProcessor.authenticate_3ds2_raw(
-        publishable_key=request.publishable_key,
-        payload=request.payload,
-    )
+    result = StripeProcessor.authenticate_3ds2_raw(payload=request.payload)
     return JSONResponse(status_code=result["status_code"], content=result["data"])
 
 
