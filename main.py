@@ -21,8 +21,9 @@ import uvicorn
 CLOVER_MERCHANT_ID = "518993421163932"
 CLOVER_ECOMM_PUBLIC_TOKEN = "cc5f1f800dad9399d3e46aca8da49d8f"
 CLOVER_ECOMM_PRIVATE_TOKEN = "c7ee250b-e9ae-ab59-ba52-616ecc63ed29"
-CLOVER_API_BASE = "https://sandbox.dev.clover.com"
-CLOVER_TOKEN_API = "https://token-sandbox.dev.clover.com"
+CLOVER_COMPANY_ID = "518993421163932"  # Aynı merchant ID
+CLOVER_API_BASE = "https://www.clover.com"
+CLOVER_TOKEN_API = "https://token.clover.com"
 
 # ============================================
 # 1. DATA MODELS
@@ -103,17 +104,6 @@ class ParseRequest(BaseModel):
 class SingleCardCheckRequest(BaseModel):
     card: Union[str, Dict] = Field(...)
     customer_id: Optional[str] = Field(None)
-
-
-class ThreeDSAuthRequest(BaseModel):
-    card: Union[str, Dict] = Field(...)
-    return_url: AnyHttpUrl = Field(...)
-    customer_id: Optional[str] = Field(None)
-    mode: Literal["automatic", "any", "challenge"] = Field("automatic")
-
-
-class RawThreeDS2AuthenticateRequest(BaseModel):
-    payload: Dict[str, Any] = Field(...)
 
 
 # ============================================
@@ -306,22 +296,25 @@ def parse_card_data_single(data: Union[str, Dict]) -> Optional[CardData]:
 
 
 # ============================================
-# 4. CLOVER PROCESSOR (YENİ - Stripe yerine)
+# 4. CLOVER PROCESSOR (GÜNCELLENDİ)
 # ============================================
 
 class CloverProcessor:
     def __init__(self):
         self.merchant_id = CLOVER_MERCHANT_ID
+        self.company_id = CLOVER_COMPANY_ID
         self.public_token = CLOVER_ECOMM_PUBLIC_TOKEN
         self.private_token = CLOVER_ECOMM_PRIVATE_TOKEN
         self.api_base = CLOVER_API_BASE
         self.token_api = CLOVER_TOKEN_API
         
+        # Auth headers
         self.headers = {
             "Authorization": f"Bearer {self.private_token}",
             "Content-Type": "application/json"
         }
         
+        # Token headers
         self.token_headers = {
             "apikey": self.public_token,
             "content-type": "application/json"
@@ -356,32 +349,35 @@ class CloverProcessor:
         except Exception as e:
             return None, str(e)
 
-    def create_payment(self, token: str, amount: int = 0, capture: bool = False) -> Tuple[Optional[str], Optional[str], Optional[Dict]]:
-        """Clover'da ödeme oluştur (Pre-Auth veya Capture)"""
-        url = f"{self.api_base}/v1/merchants/{self.merchant_id}/payments"
+    def create_charge(self, token: str, amount: int = 0, capture: bool = False) -> Tuple[Optional[str], Optional[str], Optional[Dict]]:
+        """Clover'da charge oluştur (yeni endpoint)"""
+        # Charge URL - doğru format
+        url = f"{self.api_base}/scl/v1/merchant/{self.merchant_id}/charge"
         
-        import uuid
-        idempotency_key = str(uuid.uuid4())
-        
-        data = {
-            "amount": amount,  # Kuruş cinsinden (0 = 0$)
-            "currency": "USD",
-            "source": token,
-            "capture": capture,
-            "externalPaymentId": f"payment_{int(datetime.now().timestamp())}",
-            "metadata": {
-                "type": "pre_authorization" if not capture else "capture",
-                "source": "card_checker_api"
-            }
+        # Query params
+        params = {
+            "companyId": self.company_id,
+            "companyType": "merchant"
         }
         
-        headers = {
-            **self.headers,
-            "Idempotency-Key": idempotency_key
+        # Charge payload
+        data = {
+            "amount": amount,  # Kuruş cinsinden (0 = 0$)
+            "capture": capture,
+            "currency": "USD",
+            "source": token,
+            "ecomind": "moto",  # Mail order / Telephone order
+            "tax_rate_uuid": "FY6ZPX2PMQZM8",
+            "metadata": {
+                "vt_payment_type": "vt_checkout",
+                "source_app": "com.clover.virtualterminal",
+                "existingDebtIndicator": "false"
+            },
+            "custom_attributes": {}
         }
         
         try:
-            response = requests.post(url, json=data, headers=headers)
+            response = requests.post(url, json=data, params=params, headers=self.headers)
             result = response.json()
             
             if response.status_code == 200:
@@ -396,7 +392,7 @@ class CloverProcessor:
 
     def capture_payment(self, payment_id: str, amount: Optional[int] = None) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """Clover'da capture işlemi"""
-        url = f"{self.api_base}/v1/merchants/{self.merchant_id}/payments/{payment_id}/capture"
+        url = f"{self.api_base}/scl/v1/merchant/{self.merchant_id}/payments/{payment_id}/capture"
         
         data = {}
         if amount is not None:
@@ -417,7 +413,7 @@ class CloverProcessor:
 
     def void_payment(self, payment_id: str) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """Clover'da void (iptal) işlemi"""
-        url = f"{self.api_base}/v1/merchants/{self.merchant_id}/payments/{payment_id}/void"
+        url = f"{self.api_base}/scl/v1/merchant/{self.merchant_id}/payments/{payment_id}/void"
         
         try:
             response = requests.post(url, json={}, headers=self.headers)
@@ -446,20 +442,24 @@ class CloverProcessor:
                     error=error
                 )
 
-            # 2. 0$ Pre-Auth oluştur
-            payment_id, error, response = self.create_payment(token_id, amount=0, capture=False)
+            # 2. 0$ Charge oluştur (capture: false)
+            payment_id, error, response = self.create_charge(token_id, amount=0, capture=False)
+            
             if not payment_id:
-                # 0$ çalışmazsa 1$ dene
-                payment_id, error, response = self.create_payment(token_id, amount=100, capture=False)
+                # 0$ çalışmazsa 1$ dene (100 kuruş)
+                payment_id, error, response = self.create_charge(token_id, amount=100, capture=False)
                 if not payment_id:
-                    return ProcessingResult(
-                        card=card,
-                        success=False,
-                        status="error",
-                        message="Pre-authorization failed",
-                        error=error,
-                        token_id=token_id
-                    )
+                    # 1$ da çalışmazsa 0.50$ dene (50 kuruş)
+                    payment_id, error, response = self.create_charge(token_id, amount=50, capture=False)
+                    if not payment_id:
+                        return ProcessingResult(
+                            card=card,
+                            success=False,
+                            status="error",
+                            message="Charge creation failed",
+                            error=error,
+                            token_id=token_id
+                        )
 
             # 3. Başarılı yanıt
             status = response.get('status', 'unknown')
@@ -648,28 +648,6 @@ async def void_payment(request: Dict[str, Any]):
         }
     else:
         raise HTTPException(status_code=400, detail=error or "Void failed")
-
-
-@app.post("/auth/3ds")
-async def authenticate_3ds(request: ThreeDSAuthRequest):
-    """Clover 3DS desteklemiyor, bu endpoint devre dışı"""
-    return {
-        "success": False,
-        "status": "error",
-        "error": "Clover does not support 3DS authentication via this API",
-        "note": "Clover uses physical POS devices for 3DS authentication"
-    }
-
-
-@app.post("/auth/3ds2/authenticate")
-async def authenticate_3ds2_raw(request: RawThreeDS2AuthenticateRequest):
-    """Clover 3DS desteklemiyor, bu endpoint devre dışı"""
-    return {
-        "success": False,
-        "status": "error",
-        "error": "Clover does not support 3DS2 authentication via this API",
-        "note": "Use Clover Payment Connector for 3DS authentication"
-    }
 
 
 if __name__ == "__main__":
