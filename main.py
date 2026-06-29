@@ -4,14 +4,60 @@ STRIPE CARD CHECKER API - TEK DOSYA
 Sadece API olarak çalışır.
 """
 import json
-from typing import List, Dict, Optional, Union, Tuple, Any
+from typing import List, Dict, Optional, Union, Tuple, Any, Literal
 from dataclasses import dataclass, field
 import os
 import requests
 from datetime import datetime
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field, validator
+from fastapi.responses import JSONResponse
+from pydantic import AnyHttpUrl, BaseModel, Field, validator
 import uvicorn
+
+load_dotenv()
+
+
+def stripe_secret_key_from_env() -> Optional[str]:
+    """Resolve the server-side key without exposing it in responses or logs."""
+    return os.getenv("STRIPE_SECRET_KEY") or os.getenv("SecretKey")
+
+
+def stripe_publishable_key_from_env() -> Optional[str]:
+    """Resolve the client-side key using standard and legacy env names."""
+    return (
+        os.getenv("STRIPE_PUBLISHABLE_KEY")
+        or os.getenv("STRIPE_PUBLIC_KEY")
+        or os.getenv("publishedKey")
+    )
+
+
+def require_test_secret_key(provided: Optional[str] = None) -> str:
+    key = provided or stripe_secret_key_from_env()
+    if not key:
+        raise HTTPException(status_code=503, detail="Stripe secret key is not configured")
+    if not key.startswith("sk_test_"):
+        raise HTTPException(status_code=403, detail="Live Stripe operations are disabled")
+    return key
+
+
+def require_test_publishable_key(provided: Optional[str] = None) -> str:
+    key = provided or stripe_publishable_key_from_env()
+    if not key:
+        raise HTTPException(status_code=503, detail="Stripe publishable key is not configured")
+    if not key.startswith("pk_test_"):
+        raise HTTPException(status_code=403, detail="Live Stripe operations are disabled")
+    return key
+
+
+def stripe_key_mode(key: Optional[str], test_prefix: str, live_prefix: str) -> str:
+    if not key:
+        return "missing"
+    if key.startswith(test_prefix):
+        return "test"
+    if key.startswith(live_prefix):
+        return "live_blocked"
+    return "invalid"
 
 
 # ============================================
@@ -79,12 +125,12 @@ class ProcessingResult:
 class CardCheckRequest(BaseModel):
     """Kart kontrolü için request modeli"""
     cards: Union[str, List[Dict], Dict] = Field(..., description="Kart verileri (string, JSON veya liste)")
-    stripe_key: str = Field(..., description="Stripe secret key (sk_test_ ile başlamalı)")
+    stripe_key: Optional[str] = Field(None, description="Opsiyonel test key; varsayılan .env")
     customer_id: Optional[str] = Field(None, description="Opsiyonel müşteri ID")
     
     @validator('stripe_key')
     def validate_stripe_key(cls, v):
-        if not v.startswith('sk_test_'):
+        if v is not None and not v.startswith('sk_test_'):
             raise ValueError('Only test keys (sk_test_) are allowed for security')
         return v
 
@@ -98,14 +144,44 @@ class ParseRequest(BaseModel):
 class SingleCardCheckRequest(BaseModel):
     """Tek kart kontrolü için request modeli"""
     card: Union[str, Dict] = Field(..., description="Kart verisi (string pipe format veya JSON)")
-    stripe_key: str = Field(..., description="Stripe secret key (sk_test_ ile başlamalı)")
+    stripe_key: Optional[str] = Field(None, description="Opsiyonel test key; varsayılan .env")
     customer_id: Optional[str] = Field(None, description="Opsiyonel müşteri ID")
     
     @validator('stripe_key')
     def validate_stripe_key(cls, v):
-        if not v.startswith('sk_test_'):
+        if v is not None and not v.startswith('sk_test_'):
             raise ValueError('Only test keys (sk_test_) are allowed for security')
         return v
+
+
+class ThreeDSAuthRequest(BaseModel):
+    """Stripe'ın desteklenen SetupIntent akışıyla 3DS doğrulama isteği."""
+    card: Union[str, Dict] = Field(..., description="Kart verisi (pipe formatı veya JSON)")
+    stripe_key: Optional[str] = Field(None, description="Opsiyonel test key; varsayılan .env")
+    return_url: AnyHttpUrl = Field(..., description="3DS tamamlandıktan sonra dönülecek URL")
+    customer_id: Optional[str] = Field(None, description="Opsiyonel Stripe Customer ID")
+    mode: Literal["automatic", "any", "challenge"] = Field(
+        "automatic",
+        description="Stripe 3DS tercihi",
+    )
+
+    @validator('stripe_key')
+    def validate_test_key(cls, value):
+        if value is not None and not value.startswith('sk_test_'):
+            raise ValueError('Only Stripe test keys (sk_test_) are allowed')
+        return value
+
+
+class RawThreeDS2AuthenticateRequest(BaseModel):
+    """Stripe.js'in kullandığı 3DS2 authenticate form isteği."""
+    publishable_key: Optional[str] = Field(None, description="Opsiyonel test key; varsayılan .env")
+    payload: Dict[str, Any] = Field(..., description="Form-urlencoded 3DS2 request body")
+
+    @validator('publishable_key')
+    def validate_test_publishable_key(cls, value):
+        if value is not None and not value.startswith('pk_test_'):
+            raise ValueError('Only Stripe test publishable keys (pk_test_) are allowed')
+        return value
 
 
 # ============================================
@@ -526,6 +602,136 @@ class StripeProcessor:
                 raise Exception(f"SetupIntent creation failed: {error.get('message', 'Unknown error')}")
         except Exception as e:
             raise Exception(f"SetupIntent creation failed: {str(e)}")
+
+    def authenticate_3ds(
+        self,
+        card: CardData,
+        return_url: str,
+        customer_id: Optional[str] = None,
+        mode: str = "automatic",
+    ) -> Dict[str, Any]:
+        """Start Stripe 3DS through the supported SetupIntent confirmation flow."""
+        if not self.is_test_mode:
+            return {
+                "success": False,
+                "status": "error",
+                "error": "Only Stripe test keys are allowed",
+            }
+
+        payment_method_id, payment_method_error = self.create_payment_method(card)
+        if not payment_method_id:
+            return {
+                "success": False,
+                "status": "requires_payment_method",
+                "error": payment_method_error or "Payment method creation failed",
+            }
+
+        try:
+            setup_intent = self.create_setup_intent(customer_id, payment_method_id)
+            setup_intent_id = setup_intent["id"]
+            confirm_url = f"{self.base_url}/setup_intents/{setup_intent_id}/confirm"
+            confirm_data = {
+                "payment_method": payment_method_id,
+                "payment_method_options[card][request_three_d_secure]": mode,
+                "return_url": return_url,
+                "use_stripe_sdk": "true",
+            }
+
+            response = requests.post(
+                confirm_url,
+                data=confirm_data,
+                headers=self.headers,
+                timeout=30,
+            )
+            payload = response.json() if response.text else {}
+
+            if response.status_code >= 400:
+                error = payload.get("error", {})
+                return {
+                    "success": False,
+                    "status": "error",
+                    "setup_intent_id": setup_intent_id,
+                    "payment_method_id": payment_method_id,
+                    "error": error.get("message", "3DS authentication could not be started"),
+                    "error_type": error.get("type"),
+                    "error_code": error.get("code"),
+                }
+
+            status = payload.get("status", "unknown")
+            next_action = payload.get("next_action") or {}
+            redirect = next_action.get("redirect_to_url") or {}
+            return {
+                "success": status == "succeeded",
+                "status": status,
+                "requires_action": status == "requires_action",
+                "setup_intent_id": setup_intent_id,
+                "payment_method_id": payment_method_id,
+                "client_secret": payload.get("client_secret"),
+                "next_action_type": next_action.get("type"),
+                "redirect_url": redirect.get("url"),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "status": "error",
+                "payment_method_id": payment_method_id,
+                "error": str(exc),
+            }
+
+    @staticmethod
+    def authenticate_3ds2_raw(
+        publishable_key: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Call Stripe.js's exact /v1/3ds2/authenticate endpoint in test mode."""
+        if not publishable_key.startswith("pk_test_"):
+            return {
+                "status_code": 400,
+                "data": {"error": "Only Stripe test publishable keys are allowed"},
+            }
+
+        form_data = dict(payload)
+        form_data["key"] = publishable_key
+        headers = {
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://js.stripe.com",
+            "Pragma": "no-cache",
+            "Priority": "u=3, i",
+            "Referer": "https://js.stripe.com/",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/26.5 Safari/605.1.15 Ddg/26.5"
+            ),
+        }
+
+        try:
+            response = requests.post(
+                "https://api.stripe.com/v1/3ds2/authenticate",
+                data=form_data,
+                headers=headers,
+                timeout=30,
+            )
+            try:
+                response_data: Any = response.json()
+            except ValueError:
+                response_data = {"body": response.text[:2000]}
+
+            return {
+                "status_code": response.status_code,
+                "data": response_data,
+            }
+        except requests.RequestException as exc:
+            return {
+                "status_code": 502,
+                "data": {"error": f"Stripe 3DS2 request failed: {exc}"},
+            }
     
     def confirm_setup_intent(self, setup_id: str, client_secret: str, card: CardData) -> Dict[str, Any]:
         """SetupIntent'i kart ile onayla"""
@@ -706,7 +912,9 @@ async def root():
             "/health": "Sağlık kontrolü",
             "/parse": "Sadece kart verilerini parse et",
             "/check": "Parse et ve Stripe ile kontrol et (toplu)",
-            "/check/single": "Parse et ve Stripe ile kontrol et (tek)"
+            "/check/single": "Parse et ve Stripe ile kontrol et (tek)",
+            "/auth/3ds": "Stripe SetupIntent ile 3DS doğrulama başlat",
+            "/auth/3ds2/authenticate": "Stripe /v1/3ds2/authenticate raw test çağrısı"
         },
         "docs": "/docs",
         "redoc": "/redoc"
@@ -716,10 +924,17 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Sağlık kontrolü"""
+    secret_key = stripe_secret_key_from_env()
+    publishable_key = stripe_publishable_key_from_env()
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "Stripe Card Checker API"
+        "service": "Stripe Card Checker API",
+        "stripe": {
+            "secret_key": stripe_key_mode(secret_key, "sk_test_", "sk_live_"),
+            "publishable_key": stripe_key_mode(publishable_key, "pk_test_", "pk_live_"),
+            "live_operations_enabled": False,
+        },
     }
 
 
@@ -772,7 +987,7 @@ async def check_cards(request: CardCheckRequest):
     if not cards:
         raise HTTPException(status_code=400, detail="No valid cards found")
 
-    processor = StripeProcessor(request.stripe_key)
+    processor = StripeProcessor(require_test_secret_key(request.stripe_key))
     results = processor.process_cards(cards, request.customer_id)
     serialized = [serialize_result(result) for result in results]
 
@@ -791,9 +1006,45 @@ async def check_single_card(request: SingleCardCheckRequest):
     if card is None:
         raise HTTPException(status_code=400, detail="No valid card found")
 
-    processor = StripeProcessor(request.stripe_key)
+    processor = StripeProcessor(require_test_secret_key(request.stripe_key))
     result = processor.process_card(card, request.customer_id)
     return serialize_result(result)
+
+
+@app.post("/auth/3ds")
+async def authenticate_3ds(request: ThreeDSAuthRequest):
+    """Start a Stripe-supported 3DS flow in test mode."""
+    card = parse_card_data_single(request.card)
+    if card is None:
+        raise HTTPException(status_code=400, detail="No valid card found")
+
+    processor = StripeProcessor(require_test_secret_key(request.stripe_key))
+    result = processor.authenticate_3ds(
+        card=card,
+        return_url=str(request.return_url),
+        customer_id=request.customer_id,
+        mode=request.mode,
+    )
+    result["card"] = {
+        "masked": card.get_masked(),
+        "exp_month": card.exp_month,
+        "exp_year": card.exp_year,
+    }
+    result["timestamp"] = datetime.now().isoformat()
+    return result
+
+
+@app.post("/auth/3ds2/authenticate")
+async def authenticate_3ds2_raw(request: RawThreeDS2AuthenticateRequest):
+    """Forward a test-mode form payload to Stripe's exact 3DS2 endpoint."""
+    result = StripeProcessor.authenticate_3ds2_raw(
+        publishable_key=require_test_publishable_key(request.publishable_key),
+        payload=request.payload,
+    )
+    return JSONResponse(
+        status_code=result["status_code"],
+        content=result["data"],
+    )
 
 
 if __name__ == "__main__":
