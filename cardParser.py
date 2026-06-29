@@ -8,18 +8,17 @@ import json
 from typing import List, Dict, Optional, Union, Tuple, Any
 from dataclasses import dataclass, field
 import os
+import re
+import json
 import requests
+from typing import Dict, List, Optional, Union, Any, Tuple
 from datetime import datetime
+from dataclasses import dataclass, field
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
 import uvicorn
-import sys
 
-
-# ============================================
-# 1. DATA MODELS
-# ============================================
 
 @dataclass
 class CardData:
@@ -60,61 +59,6 @@ class CardData:
         }
 
 
-@dataclass
-class ProcessingResult:
-    """İşlem sonucu modeli"""
-    card: CardData
-    success: bool
-    status: str
-    message: str
-    error: Optional[str] = None
-    setup_intent_id: Optional[str] = None
-    payment_method_id: Optional[str] = None
-    requires_action: bool = False
-    redirect_url: Optional[str] = None
-    raw_response: Optional[Dict] = None
-
-
-# ============================================
-# 2. API REQUEST MODELS
-# ============================================
-
-class CardCheckRequest(BaseModel):
-    """Kart kontrolü için request modeli"""
-    cards: Union[str, List[Dict], Dict] = Field(..., description="Kart verileri (string, JSON veya liste)")
-    stripe_key: str = Field(..., description="Stripe secret key (sk_test_ ile başlamalı)")
-    customer_id: Optional[str] = Field(None, description="Opsiyonel müşteri ID")
-    
-    @validator('stripe_key')
-    def validate_stripe_key(cls, v):
-        if not v.startswith('sk_test_'):
-            raise ValueError('Only test keys (sk_test_) are allowed for security')
-        return v
-
-
-class ParseRequest(BaseModel):
-    """Sadece parse işlemi için request modeli"""
-    data: Union[str, List[Dict], Dict] = Field(..., description="Parse edilecek kart verileri")
-    return_type: str = Field("json", description="Dönüş tipi: json veya list")
-
-
-class SingleCardCheckRequest(BaseModel):
-    """Tek kart kontrolü için request modeli"""
-    card: Union[str, Dict] = Field(..., description="Kart verisi (string pipe format veya JSON)")
-    stripe_key: str = Field(..., description="Stripe secret key (sk_test_ ile başlamalı)")
-    customer_id: Optional[str] = Field(None, description="Opsiyonel müşteri ID")
-    
-    @validator('stripe_key')
-    def validate_stripe_key(cls, v):
-        if not v.startswith('sk_test_'):
-            raise ValueError('Only test keys (sk_test_) are allowed for security')
-        return v
-
-
-# ============================================
-# 3. CARD PARSER
-# ============================================
-
 class CardParser:
     """
     Farklı formatlardaki kart verilerini parse eden sınıf
@@ -154,11 +98,6 @@ class CardParser:
                     return CardParser._parse_full_pipe(data)
                 else:
                     return CardParser._parse_pipe(data)
-            
-            # Sadece kart numarası ve tarih formatı (örn: "4111111111111111|12|25|123")
-            parts = data.split('|')
-            if len(parts) >= 3 and all(p.strip().isdigit() for p in parts[:3] if p.strip()):
-                return CardParser._parse_pipe(data)
         
         return []
     
@@ -289,110 +228,77 @@ class CardParser:
                         year = year[-2:]
                     
                     if month.isdigit() and year.isdigit():
-                        # Ay kontrolü
-                        month_int = int(month)
-                        if 1 <= month_int <= 12:
-                            return month, year
+                        return month, year
         
         # Sadece sayı varsa (3223 -> 03/23)
         if exp_str.isdigit() and len(exp_str) == 4:
-            month = exp_str[:2]
-            year = exp_str[2:]
-            month_int = int(month)
-            if 1 <= month_int <= 12:
-                return month, year
+            return exp_str[:2], exp_str[2:]
         
         return None, None
     
     @staticmethod
     def _extract_from_json_item(item: Dict) -> Optional[CardData]:
         """JSON objesinden kart verisini çıkar"""
-        try:
-            # Format 1: Direct fields (number, exp_month, exp_year, cvc)
-            if 'number' in item:
-                number = item['number']
-                exp_month = item.get('exp_month') or item.get('month')
-                exp_year = item.get('exp_year') or item.get('year')
-                cvc = item.get('cvc') or item.get('cvv') or item.get('CVV')
-                
-                if number and exp_month and exp_year and cvc:
-                    # Eğer exp_month/exp_year string değilse stringe çevir
-                    exp_month = str(exp_month).zfill(2)  # 1 -> 01
-                    exp_year = str(exp_year)
-                    if len(exp_year) == 4:
-                        exp_year = exp_year[-2:]
-                    
+        
+        # Format 1: Direct fields (number, exp_month, exp_year, cvc)
+        if 'number' in item:
+            number = item['number']
+            exp_month = item.get('exp_month') or item.get('month')
+            exp_year = item.get('exp_year') or item.get('year')
+            cvc = item.get('cvc') or item.get('cvv') or item.get('CVV')
+            
+            if number and exp_month and exp_year and cvc:
+                return CardData(
+                    number=str(number),
+                    exp_month=str(exp_month),
+                    exp_year=str(exp_year),
+                    cvc=str(cvc)
+                )
+        
+        # Format 2: CreditCard wrapper
+        if 'CreditCard' in item:
+            cc = item['CreditCard']
+            number = cc.get('CardNumber') or cc.get('number')
+            exp = cc.get('Exp') or cc.get('exp') or cc.get('expiration')
+            cvc = cc.get('CVV') or cc.get('cvv') or cc.get('cvc')
+            
+            if number and exp and cvc:
+                exp_month, exp_year = CardParser._parse_expiration(str(exp))
+                if exp_month and exp_year:
                     return CardData(
                         number=str(number),
                         exp_month=exp_month,
                         exp_year=exp_year,
                         cvc=str(cvc)
                     )
+        
+        # Format 3: CardInfo wrapper
+        if 'CardInfo' in item:
+            ci = item['CardInfo']
+            number = ci.get('CardNumber') or ci.get('number')
+            exp = ci.get('Expiration') or ci.get('exp')
+            cvc = ci.get('CVV') or ci.get('cvc')
             
-            # Format 2: CreditCard wrapper
-            if 'CreditCard' in item:
-                cc = item['CreditCard']
-                number = cc.get('CardNumber') or cc.get('number')
-                exp = cc.get('Exp') or cc.get('exp') or cc.get('expiration')
-                cvc = cc.get('CVV') or cc.get('cvv') or cc.get('cvc')
-                
-                if number and exp and cvc:
-                    exp_month, exp_year = CardParser._parse_expiration(str(exp))
-                    if exp_month and exp_year:
-                        return CardData(
-                            number=str(number),
-                            exp_month=exp_month,
-                            exp_year=exp_year,
-                            cvc=str(cvc)
-                        )
-            
-            # Format 3: CardInfo wrapper
-            if 'CardInfo' in item:
-                ci = item['CardInfo']
-                number = ci.get('CardNumber') or ci.get('number')
-                exp = ci.get('Expiration') or ci.get('exp')
-                cvc = ci.get('CVV') or ci.get('cvc')
-                
-                if number and exp and cvc:
-                    exp_month, exp_year = CardParser._parse_expiration(str(exp))
-                    if exp_month and exp_year:
-                        return CardData(
-                            number=str(number),
-                            exp_month=exp_month,
-                            exp_year=exp_year,
-                            cvc=str(cvc)
-                        )
-            
-            # Format 4: Kart formatındaki string'den parse et
-            if 'card' in item and isinstance(item['card'], str):
-                card_str = item['card']
-                parts = card_str.split('|')
-                if len(parts) >= 3:
-                    number = parts[0].strip()
-                    exp_part = parts[1].strip()
-                    cvc = parts[2].strip()
-                    exp_month, exp_year = CardParser._parse_expiration(exp_part)
-                    if number and exp_month and exp_year and cvc:
-                        return CardData(
-                            number=number,
-                            exp_month=exp_month,
-                            exp_year=exp_year,
-                            cvc=cvc
-                        )
-            
-            return None
-            
-        except Exception:
-            return None
+            if number and exp and cvc:
+                exp_month, exp_year = CardParser._parse_expiration(str(exp))
+                if exp_month and exp_year:
+                    return CardData(
+                        number=str(number),
+                        exp_month=exp_month,
+                        exp_year=exp_year,
+                        cvc=str(cvc)
+                    )
+        
+        return None
 
 
 # ============================================
-# 4. PARSER FONKSİYONLARI
+# PARSER FONKSİYONU (MAIN İÇİN)
 # ============================================
 
 def parse_card_data(data: Union[str, List, Dict]) -> List[CardData]:
     """
-    Ana parser fonksiyonu
+    Ana parser fonksiyonu - card_parser.py'dan çağrılır
     
     Args:
         data: Herhangi bir formatta kart verisi
@@ -417,27 +323,9 @@ def parse_card_data_single(data: Union[str, Dict]) -> Optional[CardData]:
     return results[0] if results else None
 
 
-def format_card_data(card: CardData) -> Dict[str, Any]:
-    """CardData'yı JSON serializable formata çevir"""
-    return {
-        "number": card.get_masked(),
-        "full_number": card.number,
-        "exp_month": card.exp_month,
-        "exp_year": card.exp_year,
-        "cvc": card.cvc,
-        "name": card.name,
-        "country": card.country,
-        "zip": card.zip,
-        "email": card.email,
-        "phone": card.phone,
-        "dob": card.dob,
-        "ip": card.ip,
-        "user_agent": card.user_agent
-    }
-
 
 # ============================================
-# 5. STRIPE PROCESSOR
+# 4. STRIPE PROCESSOR
 # ============================================
 
 class StripeProcessor:
@@ -452,72 +340,18 @@ class StripeProcessor:
         }
         self.is_test_mode = secret_key.startswith("sk_test_")
     
-    def create_payment_method(self, card: CardData) -> Tuple[Optional[str], Optional[str]]:
-        """PaymentMethod oluştur"""
-        url = f"{self.base_url}/payment_methods"
-        
-        data = {
-            "type": "card",
-            "card[number]": card.number,
-            "card[exp_month]": card.exp_month,
-            "card[exp_year]": card.exp_year,
-            "card[cvc]": card.cvc,
-            "billing_details[name]": card.name,
-        }
-        
-        if card.zip:
-            data["billing_details[address][postal_code]"] = card.zip
-        if card.country:
-            data["billing_details[address][country]"] = card.country
-        
-        try:
-            response = requests.post(url, data=data, headers=self.headers)
-            result = response.json()
-            
-            if response.status_code == 200:
-                return result.get('id'), None
-            else:
-                error = result.get('error', {})
-                return None, error.get('message', 'Unknown error')
-                
-        except Exception as e:
-            return None, str(e)
-    
-    def attach_payment_method(self, payment_method_id: str, customer_id: str) -> Tuple[bool, Optional[str]]:
-        """PaymentMethod'u müşteriye ata"""
-        url = f"{self.base_url}/payment_methods/{payment_method_id}/attach"
-        data = {"customer": customer_id}
-        
-        try:
-            response = requests.post(url, data=data, headers=self.headers)
-            if response.status_code == 200:
-                return True, None
-            else:
-                error = response.json().get('error', {})
-                return False, error.get('message', 'Unknown error')
-        except Exception as e:
-            return False, str(e)
-    
-    def create_setup_intent(self, customer_id: Optional[str] = None, payment_method_id: Optional[str] = None) -> Dict[str, Any]:
+    def create_setup_intent(self, customer_id: Optional[str] = None) -> Dict[str, Any]:
         """SetupIntent oluştur"""
         url = f"{self.base_url}/setup_intents"
         data = {"payment_method_types[]": "card"}
-        
         if customer_id:
             data["customer"] = customer_id
         
-        if payment_method_id:
-            data["payment_method"] = payment_method_id
-        
-        try:
-            response = requests.post(url, data=data, headers=self.headers)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                error = response.json().get('error', {})
-                raise Exception(f"SetupIntent creation failed: {error.get('message', 'Unknown error')}")
-        except Exception as e:
-            raise Exception(f"SetupIntent creation failed: {str(e)}")
+        response = requests.post(url, data=data, headers=self.headers)
+        if response.status_code != 200:
+            error = response.json().get('error', {}).get('message', 'Unknown error')
+            raise Exception(f"SetupIntent creation failed: {error}")
+        return response.json()
     
     def confirm_setup_intent(self, setup_id: str, client_secret: str, card: CardData) -> Dict[str, Any]:
         """SetupIntent'i kart ile onayla"""
@@ -540,17 +374,11 @@ class StripeProcessor:
             "expected_payment_method_type": "card",
         }
         
-        try:
-            response = requests.post(url, data=data, headers=self.headers)
-            return {
-                "status_code": response.status_code,
-                "data": response.json() if response.text else {}
-            }
-        except Exception as e:
-            return {
-                "status_code": 500,
-                "data": {"error": {"message": str(e)}}
-            }
+        response = requests.post(url, data=data, headers=self.headers)
+        return {
+            "status_code": response.status_code,
+            "data": response.json() if response.text else {}
+        }
     
     def process_card(self, card: CardData, customer_id: Optional[str] = None) -> ProcessingResult:
         """Tek bir kartı Stripe ile doğrula"""
@@ -564,44 +392,12 @@ class StripeProcessor:
                     error="Please use test keys (sk_test_)"
                 )
             
-            # 1. Önce PaymentMethod oluştur
-            payment_method_id, error = self.create_payment_method(card)
-            if not payment_method_id:
-                return ProcessingResult(
-                    card=card,
-                    success=False,
-                    status="error",
-                    message="Payment method creation failed",
-                    error=error
-                )
+            # 1. SetupIntent oluştur
+            setup_intent = self.create_setup_intent(customer_id)
+            setup_id = setup_intent["id"]
+            client_secret = setup_intent["client_secret"]
             
-            # 2. Eğer customer_id varsa ata
-            if customer_id:
-                attached, attach_error = self.attach_payment_method(payment_method_id, customer_id)
-                if not attached:
-                    return ProcessingResult(
-                        card=card,
-                        success=False,
-                        status="error",
-                        message="Payment method attach failed",
-                        error=attach_error
-                    )
-            
-            # 3. SetupIntent oluştur
-            try:
-                setup_intent = self.create_setup_intent(customer_id, payment_method_id)
-                setup_id = setup_intent["id"]
-                client_secret = setup_intent["client_secret"]
-            except Exception as e:
-                return ProcessingResult(
-                    card=card,
-                    success=False,
-                    status="error",
-                    message="SetupIntent creation failed",
-                    error=str(e)
-                )
-            
-            # 4. SetupIntent'i onayla
+            # 2. SetupIntent'i onayla
             result = self.confirm_setup_intent(setup_id, client_secret, card)
             
             if result["status_code"] == 200:
@@ -615,8 +411,7 @@ class StripeProcessor:
                         status=status,
                         message="Card verified successfully",
                         setup_intent_id=setup_id,
-                        payment_method_id=payment_method_id,
-                        raw_response=data
+                        payment_method_id=data.get("payment_method")
                     )
                 elif status == "requires_action":
                     next_action = data.get("next_action", {})
@@ -629,9 +424,7 @@ class StripeProcessor:
                         message="3D Secure authentication required",
                         requires_action=True,
                         redirect_url=redirect_data.get("url"),
-                        setup_intent_id=setup_id,
-                        payment_method_id=payment_method_id,
-                        raw_response=data
+                        setup_intent_id=setup_id
                     )
                 else:
                     return ProcessingResult(
@@ -639,9 +432,7 @@ class StripeProcessor:
                         success=False,
                         status=status,
                         message=f"Unexpected status: {status}",
-                        setup_intent_id=setup_id,
-                        payment_method_id=payment_method_id,
-                        raw_response=data
+                        setup_intent_id=setup_id
                     )
             else:
                 error_data = result["data"].get("error", {})
@@ -650,8 +441,7 @@ class StripeProcessor:
                     success=False,
                     status=f"error_{result['status_code']}",
                     message="Card verification failed",
-                    error=f"{error_data.get('type')}: {error_data.get('message')}",
-                    raw_response=result["data"]
+                    error=f"{error_data.get('type')}: {error_data.get('message')}"
                 )
                 
         except Exception as e:
@@ -670,59 +460,3 @@ class StripeProcessor:
             result = self.process_card(card, customer_id)
             results.append(result)
         return results
-
-
-# ============================================
-# 6. FASTAPI APP
-# ============================================
-
-app = FastAPI(
-    title="Stripe Card Checker API",
-    description="Parse and verify credit cards with Stripe",
-    version="1.0.0"
-)
-
-
-# ============================================
-# 7. API ENDPOINTS
-# ============================================
-
-@app.get("/")
-async def root():
-    """Ana sayfa"""
-    return {
-        "message": "Stripe Card Checker API",
-        "version": "1.0.0",
-        "endpoints": {
-            "/": "API bilgisi",
-            "/health": "Sağlık kontrolü",
-            "/parse": "Sadece kart verilerini parse et",
-            "/check": "Parse et ve Stripe ile kontrol et (toplu)",
-            "/check/single": "Parse et ve Stripe ile kontrol et (tek)"
-        },
-        "docs": "/docs",
-        "redoc": "/redoc"
-    }
-
-
-@app.get("/health")
-async def health_check():
-    """Sağlık kontrolü"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "service": "Stripe Card Checker API"
-    }
-
-
-@app.post("/parse")
-async def parse_cards(request: ParseRequest):
-    """
-    Sadece kart verilerini parse et
-    
-    Request body:
-    ```json
-    {
-        "data": "4111111111111111|12|25|123",
-        "return_type": "json"
-    }
