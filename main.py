@@ -1,7 +1,8 @@
 """
-STRIPE CARD CHECKER API - CANLI ANAHTAR SABİT
-Parser + Stripe işleme, .env değişkenleri koda gömüldü.
+CLOVER CARD CHECKER API - CANLI ANAHTAR SABİT
+Parser + Clover işleme, .env değişkenleri koda gömüldü.
 """
+
 import json
 from typing import List, Dict, Optional, Union, Tuple, Any, Literal
 from dataclasses import dataclass, field
@@ -14,11 +15,14 @@ from pydantic import AnyHttpUrl, BaseModel, Field
 import uvicorn
 
 # ============================================
-# 0. SABİT ANAHTARLAR (Gömülü)
+# 0. SABİT ANAHTARLAR (Clover - Gömülü)
 # ============================================
 
-STRIPE_SECRET_KEY = "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"
-STRIPE_PUBLISHABLE_KEY = "pk_live_51RwD60JJOZ1i4ld726PusbRNr1p5bASCsfap788jHdetIntqP5nRigWCf3VWgR68hv3pbYHzG1iYdomoIun8xtT000SpmazmtJ"
+CLOVER_MERCHANT_ID = "518993421163932"
+CLOVER_ECOMM_PUBLIC_TOKEN = "cc5f1f800dad9399d3e46aca8da49d8f"
+CLOVER_ECOMM_PRIVATE_TOKEN = "c7ee250b-e9ae-ab59-ba52-616ecc63ed29"
+CLOVER_API_BASE = "https://sandbox.dev.clover.com"
+CLOVER_TOKEN_API = "https://token-sandbox.dev.clover.com"
 
 # ============================================
 # 1. DATA MODELS
@@ -43,21 +47,28 @@ class CardData:
     def get_masked(self) -> str:
         return f"{self.number[:4]}****{self.number[-4:]}"
 
-    def to_stripe_format(self) -> Dict[str, Any]:
+    def to_clover_format(self) -> Dict[str, Any]:
         return {
             "number": self.number,
             "exp_month": self.exp_month,
             "exp_year": self.exp_year,
-            "cvc": self.cvc,
-            "billing_details": {
-                "name": self.name,
-                "address": {
-                    "line1": "Test Street 123",
-                    "postal_code": self.zip or "00000",
-                    "country": self.country or "US"
-                }
-            }
+            "cvv": self.cvc,
+            "brand": self._detect_brand()
         }
+
+    def _detect_brand(self) -> str:
+        patterns = {
+            "VISA": r'^4',
+            "MASTERCARD": r'^(5[1-5]|2[2-7])',
+            "AMEX": r'^(34|37)',
+            "DISCOVER": r'^(6011|65|64[4-9]|622)',
+            "JCB": r'^35'
+        }
+        import re
+        for brand, pattern in patterns.items():
+            if re.match(pattern, self.number):
+                return brand
+        return "UNKNOWN"
 
 
 @dataclass
@@ -67,15 +78,16 @@ class ProcessingResult:
     status: str
     message: str
     error: Optional[str] = None
-    setup_intent_id: Optional[str] = None
-    payment_method_id: Optional[str] = None
+    token_id: Optional[str] = None
+    payment_id: Optional[str] = None
+    auth_id: Optional[str] = None
     requires_action: bool = False
     redirect_url: Optional[str] = None
     raw_response: Optional[Dict] = None
 
 
 # ============================================
-# 2. API REQUEST MODELS (stripe_key alanları yok)
+# 2. API REQUEST MODELS
 # ============================================
 
 class CardCheckRequest(BaseModel):
@@ -105,7 +117,7 @@ class RawThreeDS2AuthenticateRequest(BaseModel):
 
 
 # ============================================
-# 3. CARD PARSER
+# 3. CARD PARSER (Aynı - Değişmedi)
 # ============================================
 
 class CardParser:
@@ -294,246 +306,176 @@ def parse_card_data_single(data: Union[str, Dict]) -> Optional[CardData]:
 
 
 # ============================================
-# 4. STRIPE PROCESSOR (sabit anahtar kullanır)
+# 4. CLOVER PROCESSOR (YENİ - Stripe yerine)
 # ============================================
 
-class StripeProcessor:
+class CloverProcessor:
     def __init__(self):
-        self.secret_key = STRIPE_SECRET_KEY
-        self.base_url = "https://api.stripe.com/v1"
+        self.merchant_id = CLOVER_MERCHANT_ID
+        self.public_token = CLOVER_ECOMM_PUBLIC_TOKEN
+        self.private_token = CLOVER_ECOMM_PRIVATE_TOKEN
+        self.api_base = CLOVER_API_BASE
+        self.token_api = CLOVER_TOKEN_API
+        
         self.headers = {
-            "Authorization": f"Bearer {self.secret_key}",
-            "Content-Type": "application/x-www-form-urlencoded"
+            "Authorization": f"Bearer {self.private_token}",
+            "Content-Type": "application/json"
+        }
+        
+        self.token_headers = {
+            "apikey": self.public_token,
+            "content-type": "application/json"
         }
 
-    def create_payment_method(self, card: CardData) -> Tuple[Optional[str], Optional[str]]:
-        url = f"{self.base_url}/payment_methods"
+    def create_token(self, card: CardData) -> Tuple[Optional[str], Optional[str]]:
+        """Clover'da token oluştur"""
+        url = f"{self.token_api}/v1/tokens"
         data = {
-            "type": "card",
-            "card[number]": card.number,
-            "card[exp_month]": card.exp_month,
-            "card[exp_year]": card.exp_year,
-            "card[cvc]": card.cvc,
-            "billing_details[name]": card.name,
+            "card": {
+                "number": card.number,
+                "exp_month": card.exp_month,
+                "exp_year": card.exp_year,
+                "cvv": card.cvc,
+                "brand": card._detect_brand()
+            }
         }
-        if card.zip:
-            data["billing_details[address][postal_code]"] = card.zip
-        if card.country:
-            data["billing_details[address][country]"] = card.country
+        
         try:
-            response = requests.post(url, data=data, headers=self.headers)
+            response = requests.post(url, json=data, headers=self.token_headers)
             result = response.json()
+            
             if response.status_code == 200:
-                return result.get('id'), None
+                token_id = result.get('id')
+                if token_id:
+                    return token_id, None
+                return None, "Token ID not found in response"
             else:
-                error = result.get('error', {})
-                return None, error.get('message', 'Unknown error')
+                error = result.get('message', result.get('error', 'Unknown error'))
+                return None, error
+                
         except Exception as e:
             return None, str(e)
 
-    def attach_payment_method(self, payment_method_id: str, customer_id: str) -> Tuple[bool, Optional[str]]:
-        url = f"{self.base_url}/payment_methods/{payment_method_id}/attach"
-        data = {"customer": customer_id}
-        try:
-            response = requests.post(url, data=data, headers=self.headers)
-            if response.status_code == 200:
-                return True, None
-            else:
-                error = response.json().get('error', {})
-                return False, error.get('message', 'Unknown error')
-        except Exception as e:
-            return False, str(e)
-
-    def create_setup_intent(self, customer_id: Optional[str] = None, payment_method_id: Optional[str] = None) -> Dict[str, Any]:
-        url = f"{self.base_url}/setup_intents"
-        data = {"payment_method_types[]": "card"}
-        if customer_id:
-            data["customer"] = customer_id
-        if payment_method_id:
-            data["payment_method"] = payment_method_id
-        try:
-            response = requests.post(url, data=data, headers=self.headers)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                error = response.json().get('error', {})
-                raise Exception(f"SetupIntent creation failed: {error.get('message', 'Unknown error')}")
-        except Exception as e:
-            raise Exception(f"SetupIntent creation failed: {str(e)}")
-
-    def confirm_setup_intent(self, setup_id: str, client_secret: str, payment_method_id: str, return_url: str = "https://example.com/return") -> Dict[str, Any]:
-        url = f"{self.base_url}/setup_intents/{setup_id}/confirm"
+    def create_payment(self, token: str, amount: int = 0, capture: bool = False) -> Tuple[Optional[str], Optional[str], Optional[Dict]]:
+        """Clover'da ödeme oluştur (Pre-Auth veya Capture)"""
+        url = f"{self.api_base}/v1/merchants/{self.merchant_id}/payments"
+        
+        import uuid
+        idempotency_key = str(uuid.uuid4())
+        
         data = {
-            "return_url": return_url,
-            "use_stripe_sdk": "true",
-            "client_secret": client_secret,
-            "payment_method": payment_method_id,
+            "amount": amount,  # Kuruş cinsinden (0 = 0$)
+            "currency": "USD",
+            "source": token,
+            "capture": capture,
+            "externalPaymentId": f"payment_{int(datetime.now().timestamp())}",
+            "metadata": {
+                "type": "pre_authorization" if not capture else "capture",
+                "source": "card_checker_api"
+            }
         }
-        try:
-            response = requests.post(url, data=data, headers=self.headers, timeout=30)
-            return {
-                "status_code": response.status_code,
-                "data": response.json() if response.text else {}
-            }
-        except Exception as e:
-            return {
-                "status_code": 500,
-                "data": {"error": {"message": str(e)}}
-            }
-
-    def authenticate_3ds(self, card: CardData, return_url: str, customer_id: Optional[str] = None, mode: str = "automatic") -> Dict[str, Any]:
-        payment_method_id, error = self.create_payment_method(card)
-        if not payment_method_id:
-            return {"success": False, "status": "requires_payment_method", "error": error or "Payment method creation failed"}
-        try:
-            setup_intent = self.create_setup_intent(customer_id, payment_method_id)
-            setup_id = setup_intent["id"]
-            confirm_url = f"{self.base_url}/setup_intents/{setup_id}/confirm"
-            confirm_data = {
-                "payment_method": payment_method_id,
-                "payment_method_options[card][request_three_d_secure]": mode,
-                "return_url": return_url,
-                "use_stripe_sdk": "true",
-            }
-            response = requests.post(confirm_url, data=confirm_data, headers=self.headers, timeout=30)
-            payload = response.json() if response.text else {}
-            if response.status_code >= 400:
-                error = payload.get("error", {})
-                return {
-                    "success": False,
-                    "status": "error",
-                    "setup_intent_id": setup_id,
-                    "payment_method_id": payment_method_id,
-                    "error": error.get("message", "3DS authentication could not be started"),
-                    "error_type": error.get("type"),
-                    "error_code": error.get("code"),
-                }
-            status = payload.get("status", "unknown")
-            next_action = payload.get("next_action") or {}
-            redirect = next_action.get("redirect_to_url") or {}
-            return {
-                "success": status == "succeeded",
-                "status": status,
-                "requires_action": status == "requires_action",
-                "setup_intent_id": setup_id,
-                "payment_method_id": payment_method_id,
-                "client_secret": payload.get("client_secret"),
-                "next_action_type": next_action.get("type"),
-                "redirect_url": redirect.get("url"),
-            }
-        except Exception as exc:
-            return {"success": False, "status": "error", "payment_method_id": payment_method_id, "error": str(exc)}
-
-    @staticmethod
-    def authenticate_3ds2_raw(payload: Dict[str, Any]) -> Dict[str, Any]:
-        form_data = dict(payload)
-        form_data["key"] = STRIPE_PUBLISHABLE_KEY
+        
         headers = {
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Cache-Control": "no-cache",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": "https://js.stripe.com",
-            "Pragma": "no-cache",
-            "Referer": "https://js.stripe.com/",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-site",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Safari/605.1.15 Ddg/26.5",
+            **self.headers,
+            "Idempotency-Key": idempotency_key
         }
+        
         try:
-            response = requests.post("https://api.stripe.com/v1/3ds2/authenticate", data=form_data, headers=headers, timeout=30)
-            try:
-                response_data = response.json()
-            except ValueError:
-                response_data = {"body": response.text[:2000]}
-            return {"status_code": response.status_code, "data": response_data}
-        except requests.RequestException as exc:
-            return {"status_code": 502, "data": {"error": f"Stripe 3DS2 request failed: {exc}"}}
+            response = requests.post(url, json=data, headers=headers)
+            result = response.json()
+            
+            if response.status_code == 200:
+                payment_id = result.get('id')
+                return payment_id, None, result
+            else:
+                error = result.get('message', result.get('error', 'Unknown error'))
+                return None, error, result
+                
+        except Exception as e:
+            return None, str(e), None
+
+    def capture_payment(self, payment_id: str, amount: Optional[int] = None) -> Tuple[bool, Optional[str], Optional[Dict]]:
+        """Clover'da capture işlemi"""
+        url = f"{self.api_base}/v1/merchants/{self.merchant_id}/payments/{payment_id}/capture"
+        
+        data = {}
+        if amount is not None:
+            data["amount"] = amount
+        
+        try:
+            response = requests.post(url, json=data, headers=self.headers)
+            result = response.json()
+            
+            if response.status_code == 200:
+                return True, None, result
+            else:
+                error = result.get('message', result.get('error', 'Unknown error'))
+                return False, error, result
+                
+        except Exception as e:
+            return False, str(e), None
+
+    def void_payment(self, payment_id: str) -> Tuple[bool, Optional[str], Optional[Dict]]:
+        """Clover'da void (iptal) işlemi"""
+        url = f"{self.api_base}/v1/merchants/{self.merchant_id}/payments/{payment_id}/void"
+        
+        try:
+            response = requests.post(url, json={}, headers=self.headers)
+            result = response.json()
+            
+            if response.status_code == 200:
+                return True, None, result
+            else:
+                error = result.get('message', result.get('error', 'Unknown error'))
+                return False, error, result
+                
+        except Exception as e:
+            return False, str(e), None
 
     def process_card(self, card: CardData, customer_id: Optional[str] = None) -> ProcessingResult:
+        """Kart işleme ana fonksiyonu"""
         try:
-            payment_method_id, error = self.create_payment_method(card)
-            if not payment_method_id:
+            # 1. Token oluştur
+            token_id, error = self.create_token(card)
+            if not token_id:
                 return ProcessingResult(
                     card=card,
                     success=False,
                     status="error",
-                    message="Payment method creation failed",
+                    message="Token creation failed",
                     error=error
                 )
-            if customer_id:
-                attached, attach_error = self.attach_payment_method(payment_method_id, customer_id)
-                if not attached:
+
+            # 2. 0$ Pre-Auth oluştur
+            payment_id, error, response = self.create_payment(token_id, amount=0, capture=False)
+            if not payment_id:
+                # 0$ çalışmazsa 1$ dene
+                payment_id, error, response = self.create_payment(token_id, amount=100, capture=False)
+                if not payment_id:
                     return ProcessingResult(
                         card=card,
                         success=False,
                         status="error",
-                        message="Payment method attach failed",
-                        error=attach_error
+                        message="Pre-authorization failed",
+                        error=error,
+                        token_id=token_id
                     )
-            try:
-                setup_intent = self.create_setup_intent(customer_id, payment_method_id)
-                setup_id = setup_intent["id"]
-                client_secret = setup_intent["client_secret"]
-            except Exception as e:
-                return ProcessingResult(
-                    card=card,
-                    success=False,
-                    status="error",
-                    message="SetupIntent creation failed",
-                    error=str(e)
-                )
-            confirm_result = self.confirm_setup_intent(setup_id, client_secret, payment_method_id, return_url="https://example.com/return")
-            status_code = confirm_result.get("status_code")
-            data = confirm_result.get("data", {})
-            if status_code != 200:
-                error_data = data.get("error", {})
-                return ProcessingResult(
-                    card=card,
-                    success=False,
-                    status=f"error_{status_code}",
-                    message="Card verification failed",
-                    error=f"{error_data.get('type')}: {error_data.get('message')}",
-                    setup_intent_id=setup_id,
-                    payment_method_id=payment_method_id,
-                    raw_response=data
-                )
-            status = data.get("status")
-            if status == "succeeded":
-                return ProcessingResult(
-                    card=card,
-                    success=True,
-                    status=status,
-                    message="Card verified successfully",
-                    setup_intent_id=setup_id,
-                    payment_method_id=payment_method_id,
-                    raw_response=data
-                )
-            elif status == "requires_action":
-                next_action = data.get("next_action", {})
-                redirect_data = next_action.get("redirect_to_url", {})
-                return ProcessingResult(
-                    card=card,
-                    success=False,
-                    status=status,
-                    message="3D Secure authentication required",
-                    requires_action=True,
-                    redirect_url=redirect_data.get("url"),
-                    setup_intent_id=setup_id,
-                    payment_method_id=payment_method_id,
-                    raw_response=data
-                )
-            else:
-                return ProcessingResult(
-                    card=card,
-                    success=False,
-                    status=status,
-                    message=f"Unexpected status: {status}",
-                    setup_intent_id=setup_id,
-                    payment_method_id=payment_method_id,
-                    raw_response=data
-                )
+
+            # 3. Başarılı yanıt
+            status = response.get('status', 'unknown')
+            is_success = status in ['AUTHORIZED', 'CAPTURED', 'PAID']
+            
+            return ProcessingResult(
+                card=card,
+                success=is_success,
+                status=status,
+                message="Card verified successfully" if is_success else f"Status: {status}",
+                token_id=token_id,
+                payment_id=payment_id,
+                auth_id=payment_id,
+                raw_response=response
+            )
+
         except Exception as e:
             return ProcessingResult(
                 card=card,
@@ -551,29 +493,29 @@ class StripeProcessor:
 
 
 # ============================================
-# 5. FASTAPI APP
+# 5. FASTAPI APP (Güncellendi)
 # ============================================
 
 app = FastAPI(
-    title="Stripe Card Checker API",
-    description="Live key embedded - no .env needed",
-    version="2.1.0"
+    title="Clover Card Checker API",
+    description="Live key embedded - Clover entegrasyonu",
+    version="2.0.0"
 )
 
 
 @app.get("/")
 async def root():
     return {
-        "message": "Stripe Card Checker API - Live Mode (Embedded Key)",
-        "version": "2.1.0",
+        "message": "Clover Card Checker API - Live Mode (Embedded Key)",
+        "version": "2.0.0",
         "endpoints": {
             "/": "Info",
             "/health": "Health check",
-            "/parse": "Parse cards without Stripe",
+            "/parse": "Parse cards without Clover",
             "/check": "Batch check cards",
             "/check/single": "Check single card",
-            "/auth/3ds": "Start 3DS authentication",
-            "/auth/3ds2/authenticate": "Raw 3DS2 authenticate"
+            "/capture": "Capture a pre-authorized payment",
+            "/void": "Void a payment"
         },
         "docs": "/docs"
     }
@@ -598,6 +540,7 @@ async def parse_cards(request: ParseRequest):
                 "exp_year": card.exp_year,
                 "name": card.name,
                 "country": card.country,
+                "brand": card._detect_brand()
             }
             for card in cards
         ],
@@ -613,9 +556,11 @@ def serialize_result(result: ProcessingResult) -> Dict[str, Any]:
             "masked": result.card.get_masked(),
             "exp_month": result.card.exp_month,
             "exp_year": result.card.exp_year,
+            "brand": result.card._detect_brand()
         },
-        "setup_intent_id": result.setup_intent_id,
-        "payment_method_id": result.payment_method_id,
+        "token_id": result.token_id,
+        "payment_id": result.payment_id,
+        "auth_id": result.auth_id,
         "requires_action": result.requires_action,
         "redirect_url": result.redirect_url,
         "error": result.error,
@@ -628,9 +573,11 @@ async def check_cards(request: CardCheckRequest):
     cards = parse_card_data(request.cards)
     if not cards:
         raise HTTPException(status_code=400, detail="No valid cards found")
-    processor = StripeProcessor()
+    
+    processor = CloverProcessor()
     results = processor.process_cards(cards, request.customer_id)
     serialized = [serialize_result(result) for result in results]
+    
     return {
         "total": len(serialized),
         "successful": sum(1 for result in results if result.success),
@@ -644,41 +591,98 @@ async def check_single_card(request: SingleCardCheckRequest):
     card = parse_card_data_single(request.card)
     if card is None:
         raise HTTPException(status_code=400, detail="No valid card found")
-    processor = StripeProcessor()
+    
+    processor = CloverProcessor()
     result = processor.process_card(card, request.customer_id)
-    status = "Live" if result.success else ("3D" if result.requires_action else "Dead")
+    
+    status = "Live" if result.success else "Dead"
+    if result.token_id:
+        status += f" (Token: {result.token_id[:12]}...)"
+    
     return PlainTextResponse(
-        f"{card.number}|{card.exp_month}|{card.exp_year}|{card.cvc}|{status}"
+        f"{card.number}|{card.exp_month}|{card.exp_year}|{card.cvc}|{status}|{result.token_id or ''}"
     )
+
+
+@app.post("/capture")
+async def capture_payment(request: Dict[str, Any]):
+    """Bir ödemeyi capture et (pre-auth'dan sonra)"""
+    payment_id = request.get('payment_id')
+    amount = request.get('amount')  # Kuruş cinsinden
+    
+    if not payment_id:
+        raise HTTPException(status_code=400, detail="payment_id required")
+    
+    processor = CloverProcessor()
+    success, error, response = processor.capture_payment(payment_id, amount)
+    
+    if success:
+        return {
+            "success": True,
+            "message": "Payment captured successfully",
+            "payment_id": payment_id,
+            "amount": amount,
+            "response": response
+        }
+    else:
+        raise HTTPException(status_code=400, detail=error or "Capture failed")
+
+
+@app.post("/void")
+async def void_payment(request: Dict[str, Any]):
+    """Bir ödemeyi iptal et"""
+    payment_id = request.get('payment_id')
+    
+    if not payment_id:
+        raise HTTPException(status_code=400, detail="payment_id required")
+    
+    processor = CloverProcessor()
+    success, error, response = processor.void_payment(payment_id)
+    
+    if success:
+        return {
+            "success": True,
+            "message": "Payment voided successfully",
+            "payment_id": payment_id,
+            "response": response
+        }
+    else:
+        raise HTTPException(status_code=400, detail=error or "Void failed")
 
 
 @app.post("/auth/3ds")
 async def authenticate_3ds(request: ThreeDSAuthRequest):
-    card = parse_card_data_single(request.card)
-    if card is None:
-        raise HTTPException(status_code=400, detail="No valid card found")
-    processor = StripeProcessor()
-    result = processor.authenticate_3ds(
-        card=card,
-        return_url=str(request.return_url),
-        customer_id=request.customer_id,
-        mode=request.mode,
-    )
-    result["card"] = {
-        "masked": card.get_masked(),
-        "exp_month": card.exp_month,
-        "exp_year": card.exp_year,
+    """Clover 3DS desteklemiyor, bu endpoint devre dışı"""
+    return {
+        "success": False,
+        "status": "error",
+        "error": "Clover does not support 3DS authentication via this API",
+        "note": "Clover uses physical POS devices for 3DS authentication"
     }
-    result["timestamp"] = datetime.now().isoformat()
-    return result
 
 
 @app.post("/auth/3ds2/authenticate")
 async def authenticate_3ds2_raw(request: RawThreeDS2AuthenticateRequest):
-    result = StripeProcessor.authenticate_3ds2_raw(payload=request.payload)
-    return JSONResponse(status_code=result["status_code"], content=result["data"])
+    """Clover 3DS desteklemiyor, bu endpoint devre dışı"""
+    return {
+        "success": False,
+        "status": "error",
+        "error": "Clover does not support 3DS2 authentication via this API",
+        "note": "Use Clover Payment Connector for 3DS authentication"
+    }
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
+    print("=" * 60)
+    print("🏦 CLOVER CARD CHECKER API")
+    print("=" * 60)
+    print(f"🔑 Merchant ID: {CLOVER_MERCHANT_ID}")
+    print(f"🔐 Public Token: {CLOVER_ECOMM_PUBLIC_TOKEN[:15]}...")
+    print(f"🔒 Private Token: {CLOVER_ECOMM_PRIVATE_TOKEN[:15]}...")
+    print(f"🌐 API Base: {CLOVER_API_BASE}")
+    print(f"🚀 Server: http://0.0.0.0:{port}")
+    print(f"📚 Docs: http://0.0.0.0:{port}/docs")
+    print("=" * 60)
+    
     uvicorn.run(app, host="0.0.0.0", port=port)
