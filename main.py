@@ -21,11 +21,7 @@ from pymongo.errors import ConnectionFailure
 import uvicorn
 import base64
 
-# Logging ayarları
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ==================== PYDANTIC MODELS ====================
@@ -47,15 +43,13 @@ class CardRequest(BaseModel):
     @validator('exp_month')
     def validate_exp_month(cls, v):
         v = str(v).strip()
-        if len(v) == 1:
-            v = f"0{v}"
+        if len(v) == 1: v = f"0{v}"
         return v
     
     @validator('exp_year')
     def validate_exp_year(cls, v):
         v = str(v).strip()
-        if len(v) == 2:
-            v = f"20{v}"
+        if len(v) == 2: v = f"20{v}"
         return v
 
 class BatchCardRequest(BaseModel):
@@ -64,33 +58,23 @@ class BatchCardRequest(BaseModel):
 class ParseRequest(BaseModel):
     data: Union[str, List, Dict] = Field(...)
 
-# ==================== KONFIGÜRASYON (Kendi PayPal bilgilerinle değiştir!) ====================
+# ==================== KONFIGÜRASYON ====================
 CONFIG = {
-    # ⚠️ Buraya kendi PayPal LIVE Client ID ve Secret'ını yaz!
     'paypal_client_id': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
-    'paypal_client_secret': 'EDdrMKnpxsjdk_MaGcAbTUP_boVPh8jx0w1HNu8c18nbC2j8nL0b1FFYjH0eJSFcPyewmDQv6T0as9n5',
-    'paypal_api_base': 'https://api-m.paypal.com',  # LIVE için
-    # 'paypal_api_base': 'https://api-m.sandbox.paypal.com',  # Sandbox için
-    
+    'paypal_client_secret': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
+    'paypal_api_base': 'https://api-m.paypal.com',
     'mongo_uri': 'mongodb+srv://cardmarketApp:gnbqHdTrlceMZjOS@paymentmanger.gvaavzc.mongodb.net/mydb?retryWrites=true&w=majority',
     'mongo_database': 'mydb',
     'mongo_collection': 'card_checks',
     'mongo_bin_collection': 'binList'
 }
 
-app = FastAPI(
-    title="PayPal Card Checker API",
-    description="PayPal Vault Setup Tokens ile Kart Doğrulama",
-    version="8.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+app = FastAPI(title="PayPal Card Checker API", description="PayPal Vault Setup Tokens ile Kart Doğrulama", version="8.0.0", docs_url="/docs", redoc_url="/redoc")
 
 # ==================== MONGODB ====================
 
 class MongoDB:
     _instance = None
-    
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(MongoDB, cls).__new__(cls)
@@ -104,15 +88,12 @@ class MongoDB:
             self.db = self.client[CONFIG['mongo_database']]
             self.collection = self.db[CONFIG['mongo_collection']]
             self.bin_collection = self.db[CONFIG['mongo_bin_collection']]
-            
             self.collection.create_index('check_id', unique=True)
             self.collection.create_index('created_at')
             self.collection.create_index('card_last4')
             self.collection.create_index('status')
             self.bin_collection.create_index('BIN', unique=True)
-            
             logger.info('✅ MongoDB bağlantısı başarılı')
-            
         except ConnectionFailure as e:
             logger.error(f'❌ MongoDB bağlantı hatası: {str(e)}')
             raise
@@ -122,12 +103,10 @@ class MongoDB:
     
     def get_bin_info(self, card_number: str) -> Optional[Dict]:
         try:
-            bin_prefixes = [card_number[:6], card_number[:5], card_number[:4]]
-            for bin_prefix in bin_prefixes:
+            for bin_prefix in [card_number[:6], card_number[:5], card_number[:4]]:
                 result = self.bin_collection.find_one({'BIN': bin_prefix})
                 if result:
-                    if '_id' in result:
-                        result['_id'] = str(result['_id'])
+                    if '_id' in result: result['_id'] = str(result['_id'])
                     return result
             return None
         except Exception as e:
@@ -136,10 +115,8 @@ class MongoDB:
     
     def insert_record(self, data: Dict) -> str:
         try:
-            if 'created_at' not in data:
-                data['created_at'] = datetime.now().isoformat()
-            if 'updated_at' not in data:
-                data['updated_at'] = datetime.now().isoformat()
+            if 'created_at' not in data: data['created_at'] = datetime.now().isoformat()
+            if 'updated_at' not in data: data['updated_at'] = datetime.now().isoformat()
             result = self.collection.insert_one(data)
             logger.info(f'✅ Kayıt eklendi: {data.get("check_id")}')
             return str(result.inserted_id)
@@ -150,20 +127,17 @@ class MongoDB:
     def get_record(self, check_id: str) -> Optional[Dict]:
         try:
             result = self.collection.find_one({'check_id': check_id})
-            if result and '_id' in result:
-                result['_id'] = str(result['_id'])
+            if result and '_id' in result: result['_id'] = str(result['_id'])
             return result
         except Exception as e:
             logger.error(f'❌ Kayıt getirme hatası: {str(e)}')
             raise
-
 
 try:
     mongo_db = MongoDB()
 except Exception as e:
     logger.error(f'❌ MongoDB başlatılamadı: {str(e)}')
     mongo_db = None
-
 
 # ==================== PARSER ====================
 
@@ -185,7 +159,6 @@ class CardData:
     
     def get_masked(self) -> str:
         return f"{self.number[:4]}****{self.number[-4:]}"
-
 
 class CardParser:
     @staticmethod
@@ -212,11 +185,9 @@ class CardParser:
     @staticmethod
     def _parse_pipe(data: str) -> List[CardData]:
         cards = []
-        lines = data.strip().split('\n')
-        for line in lines:
+        for line in data.strip().split('\n'):
             line = line.strip()
-            if not line:
-                continue
+            if not line: continue
             parts = line.split('|')
             if len(parts) >= 3:
                 number = parts[0].strip()
@@ -224,22 +195,15 @@ class CardParser:
                 cvc = parts[2].strip()
                 exp_month, exp_year = CardParser._parse_expiration(exp_part)
                 if number and exp_month and exp_year and cvc:
-                    cards.append(CardData(
-                        number=number,
-                        exp_month=exp_month,
-                        exp_year=exp_year,
-                        cvc=cvc
-                    ))
+                    cards.append(CardData(number=number, exp_month=exp_month, exp_year=exp_year, cvc=cvc))
         return cards
     
     @staticmethod
     def _parse_full_pipe(data: str) -> List[CardData]:
         cards = []
-        lines = data.strip().split('\n')
-        for line in lines:
+        for line in data.strip().split('\n'):
             line = line.strip()
-            if not line:
-                continue
+            if not line: continue
             parts = line.split('|')
             if len(parts) >= 3:
                 number = parts[0].strip() if parts[0] else None
@@ -254,18 +218,7 @@ class CardParser:
                 if number and exp_part and cvc:
                     exp_month, exp_year = CardParser._parse_expiration(exp_part)
                     if exp_month and exp_year:
-                        cards.append(CardData(
-                            number=number,
-                            exp_month=exp_month,
-                            exp_year=exp_year,
-                            cvc=cvc,
-                            name=name,
-                            email=email,
-                            phone=phone,
-                            dob=dob,
-                            ip=ip,
-                            user_agent=user_agent
-                        ))
+                        cards.append(CardData(number=number, exp_month=exp_month, exp_year=exp_year, cvc=cvc, name=name, email=email, phone=phone, dob=dob, ip=ip, user_agent=user_agent))
         return cards
     
     @staticmethod
@@ -277,8 +230,7 @@ class CardParser:
         start_idx = 1 if has_header else 0
         for line in lines[start_idx:]:
             line = line.strip()
-            if not line:
-                continue
+            if not line: continue
             parts = line.split(',')
             if len(parts) >= 3:
                 number = parts[0].strip()
@@ -286,47 +238,34 @@ class CardParser:
                 cvc = parts[2].strip()
                 exp_month, exp_year = CardParser._parse_expiration(exp_part)
                 if number and exp_month and exp_year and cvc:
-                    cards.append(CardData(
-                        number=number,
-                        exp_month=exp_month,
-                        exp_year=exp_year,
-                        cvc=cvc
-                    ))
+                    cards.append(CardData(number=number, exp_month=exp_month, exp_year=exp_year, cvc=cvc))
         return cards
     
     @staticmethod
     def _parse_json(data: Union[List, Dict]) -> List[CardData]:
         cards = []
-        if not isinstance(data, list):
-            data = [data]
+        if not isinstance(data, list): data = [data]
         for item in data:
             card_data = CardParser._extract_from_json_item(item)
-            if card_data:
-                cards.append(card_data)
+            if card_data: cards.append(card_data)
         return cards
     
     @staticmethod
     def _parse_expiration(exp_str: str) -> Tuple[Optional[str], Optional[str]]:
         exp_str = exp_str.strip()
-        separators = ['/', '-', '|', ' ']
-        for sep in separators:
+        for sep in ['/', '-', '|', ' ']:
             if sep in exp_str:
                 parts = exp_str.split(sep)
                 if len(parts) == 2:
                     month = parts[0].strip()
                     year = parts[1].strip()
-                    if len(month) == 1:
-                        month = f"0{month}"
-                    if len(year) == 2:
-                        year = f"20{year}"
-                    elif len(year) == 4:
-                        year = year
-                    if month.isdigit() and year.isdigit():
-                        return month, year
-        if exp_str.isdigit() and len(exp_str) == 4:
-            return exp_str[:2], f"20{exp_str[2:]}"
-        elif exp_str.isdigit() and len(exp_str) == 6:
-            return exp_str[:2], exp_str[2:]
+                    if len(month) == 1: month = f"0{month}"
+                    if len(year) == 2: year = f"20{year}"
+                    elif len(year) == 4: year = year
+                    if month.isdigit() and year.isdigit(): return month, year
+        if exp_str.isdigit():
+            if len(exp_str) == 4: return exp_str[:2], f"20{exp_str[2:]}"
+            elif len(exp_str) == 6: return exp_str[:2], exp_str[2:]
         return None, None
     
     @staticmethod
@@ -337,12 +276,7 @@ class CardParser:
             exp_year = item.get('exp_year') or item.get('year')
             cvc = item.get('cvc') or item.get('cvv') or item.get('CVV')
             if number and exp_month and exp_year and cvc:
-                return CardData(
-                    number=str(number),
-                    exp_month=str(exp_month),
-                    exp_year=str(exp_year),
-                    cvc=str(cvc)
-                )
+                return CardData(number=str(number), exp_month=str(exp_month), exp_year=str(exp_year), cvc=str(cvc))
         if 'CreditCard' in item:
             cc = item['CreditCard']
             number = cc.get('CardNumber') or cc.get('number')
@@ -351,12 +285,7 @@ class CardParser:
             if number and exp and cvc:
                 exp_month, exp_year = CardParser._parse_expiration(str(exp))
                 if exp_month and exp_year:
-                    return CardData(
-                        number=str(number),
-                        exp_month=exp_month,
-                        exp_year=exp_year,
-                        cvc=str(cvc)
-                    )
+                    return CardData(number=str(number), exp_month=exp_month, exp_year=exp_year, cvc=str(cvc))
         if 'CardInfo' in item:
             ci = item['CardInfo']
             number = ci.get('CardNumber') or ci.get('number')
@@ -365,32 +294,18 @@ class CardParser:
             if number and exp and cvc:
                 exp_month, exp_year = CardParser._parse_expiration(str(exp))
                 if exp_month and exp_year:
-                    return CardData(
-                        number=str(number),
-                        exp_month=exp_month,
-                        exp_year=exp_year,
-                        cvc=str(cvc)
-                    )
+                    return CardData(number=str(number), exp_month=exp_month, exp_year=exp_year, cvc=str(cvc))
         return None
-
 
 # ==================== YARDIMCI FONKSİYONLAR ====================
 
 def detect_card_brand(card_number: str) -> str:
-    patterns = {
-        'VISA': r'^4',
-        'MASTERCARD': r'^(5[1-5]|2[2-7])',
-        'AMEX': r'^(34|37)',
-        'DISCOVER': r'^(6011|65|64[4-9]|622)',
-        'JCB': r'^35'
-    }
+    patterns = {'VISA': r'^4', 'MASTERCARD': r'^(5[1-5]|2[2-7])', 'AMEX': r'^(34|37)', 'DISCOVER': r'^(6011|65|64[4-9]|622)', 'JCB': r'^35'}
     for brand, pattern in patterns.items():
-        if re.match(pattern, card_number):
-            return brand
+        if re.match(pattern, card_number): return brand
     return 'UNKNOWN'
 
-
-# ==================== PAYPAL PROCESSOR (DÜZELTİLMİŞ) ====================
+# ==================== PAYPAL PROCESSOR (DÜZELTİLDİ) ====================
 
 class PayPalProcessor:
     def __init__(self):
@@ -402,18 +317,9 @@ class PayPalProcessor:
     def _get_access_token(self) -> str:
         try:
             auth = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
-            headers = {
-                "Authorization": f"Basic {auth}",
-                "Content-Type": "application/x-www-form-urlencoded"
-            }
+            headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded"}
             data = {"grant_type": "client_credentials"}
-
-            response = requests.post(
-                f"{self.api_base}/v1/oauth2/token",
-                headers=headers,
-                data=data
-            )
-
+            response = requests.post(f"{self.api_base}/v1/oauth2/token", headers=headers, data=data)
             if response.status_code == 200:
                 result = response.json()
                 self.access_token = result.get("access_token")
@@ -422,7 +328,6 @@ class PayPalProcessor:
             else:
                 logger.error(f"❌ Access Token hatası: {response.text}")
                 raise Exception(f"PayPal auth failed: {response.text}")
-
         except Exception as e:
             logger.error(f"❌ Token exception: {str(e)}")
             raise
@@ -438,25 +343,27 @@ class PayPalProcessor:
             country_code = bin_info.get("isoCode2", "US") if bin_info else "US"
             zip_code = "00000"
 
-            # İsim ayrıştırma ve temizleme
-            first_name = "Test"
-            last_name = "User"
-            if card.name:
-                parts = card.name.strip().split()
-                if len(parts) >= 2:
-                    first_name = parts[0]
-                    last_name = " ".join(parts[1:])
-                elif len(parts) == 1:
-                    first_name = parts[0]
-                    last_name = "User"
-            # Özel karakterleri temizle
-            first_name = re.sub(r'[^a-zA-Z0-9\s-]', '', first_name)
-            last_name = re.sub(r'[^a-zA-Z0-9\s-]', '', last_name)
+            # İsim temizleme ve ayırma
+            raw_name = card.name.strip() if card.name else "Test User"
+            # Sadece harf, boşluk ve tire bırak
+            clean_name = re.sub(r'[^a-zA-Z\s-]', '', raw_name)
+            if not clean_name or clean_name.strip() == "":
+                clean_name = "Test User"
+            name_parts = clean_name.split()
+            if len(name_parts) >= 2:
+                given_name = name_parts[0]
+                surname = " ".join(name_parts[1:])
+            elif len(name_parts) == 1:
+                given_name = name_parts[0]
+                surname = "User"
+            else:
+                given_name = "Test"
+                surname = "User"
 
             # Expiry: YYYY-MM
             expiry = f"{card.exp_year}-{card.exp_month}"
 
-            # Kart numarası ve CVC'yi temizle
+            # Kart numarası ve CVC'yi temizle (sadece rakam)
             number = re.sub(r'[^0-9]', '', card.number)
             cvc = re.sub(r'[^0-9]', '', card.cvc)
 
@@ -467,8 +374,8 @@ class PayPalProcessor:
                         "expiry": expiry,
                         "security_code": cvc,
                         "name": {
-                            "given_name": first_name,
-                            "surname": last_name
+                            "given_name": given_name,
+                            "surname": surname
                         },
                         "billing_address": {
                             "address_line_1": "123 Main St",
@@ -480,6 +387,9 @@ class PayPalProcessor:
                 }
             }
 
+            # JSON'u manuel serialize et
+            payload_json = json.dumps(payload, ensure_ascii=False)
+
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
                 "Content-Type": "application/json",
@@ -488,9 +398,10 @@ class PayPalProcessor:
 
             logger.info(f"🔄 PayPal Setup Token oluşturuluyor...")
             logger.info(f"📇 Kart: {card.get_masked()}")
-            logger.info(f"📤 Payload: {json.dumps(payload, indent=2)}")
+            logger.info(f"📤 Payload: {payload_json}")
 
-            response = requests.post(setup_url, json=payload, headers=headers)
+            # data parametresi ile gönder (json yerine)
+            response = requests.post(setup_url, data=payload_json, headers=headers)
 
             logger.info(f"📊 Response Status: {response.status_code}")
 
@@ -607,19 +518,11 @@ class PayPalProcessor:
                 'check_id': check_id
             }
 
-
 # ==================== API ENDPOINT'LER ====================
 
 @app.get("/", tags=["Root"])
 async def root():
-    return {
-        "message": "PayPal Card Checker API (Vault Setup Tokens)",
-        "docs": "/docs",
-        "redoc": "/redoc",
-        "health": "/health",
-        "version": "8.0.0"
-    }
-
+    return {"message": "PayPal Card Checker API (Vault Setup Tokens)", "docs": "/docs", "redoc": "/redoc", "health": "/health", "version": "8.0.0"}
 
 @app.get("/health", tags=["Health"])
 async def health_check():
@@ -631,9 +534,7 @@ async def health_check():
         "version": "8.0.0",
         "environment": "LIVE",
         "mongodb": mongo_status,
-        "paypal": {
-            "api_base": CONFIG['paypal_api_base']
-        },
+        "paypal": {"api_base": CONFIG['paypal_api_base']},
         "endpoints": [
             "POST /api/v1/check - PayPal kart doğrulama (Vault)",
             "POST /api/v1/check/batch - Toplu doğrulama",
@@ -644,7 +545,6 @@ async def health_check():
             "GET /health - Sağlık kontrolü"
         ]
     }
-
 
 @app.post("/api/v1/check", tags=["Card Operations"])
 async def check_card(card_request: CardRequest):
@@ -663,10 +563,8 @@ async def check_card(card_request: CardRequest):
             ip=card_request.ip,
             user_agent=card_request.user_agent
         )
-        
         processor = PayPalProcessor()
         result = processor.process_card(card)
-        
         return {
             "success": result.get('success', False),
             "status": result.get('status', 'UNKNOWN'),
@@ -674,18 +572,15 @@ async def check_card(card_request: CardRequest):
             "error": result.get('error'),
             "data": result
         }
-        
     except Exception as e:
         logger.error(f'❌ API hatası: {str(e)}')
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/api/v1/check/batch", tags=["Card Operations"])
 async def check_cards_batch(batch_request: BatchCardRequest):
     try:
         processor = PayPalProcessor()
         results = []
-        
         for card_request in batch_request.cards:
             card = CardData(
                 number=card_request.number,
@@ -701,26 +596,17 @@ async def check_cards_batch(batch_request: BatchCardRequest):
                 ip=card_request.ip,
                 user_agent=card_request.user_agent
             )
-            
             result = processor.process_card(card)
             results.append(result)
-        
-        return {
-            "success": True,
-            "total": len(results),
-            "results": results
-        }
-        
+        return {"success": True, "total": len(results), "results": results}
     except Exception as e:
         logger.error(f'❌ Batch API hatası: {str(e)}')
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/api/v1/parse", tags=["Parser"])
 async def parse_only(parse_request: ParseRequest):
     try:
         cards = CardParser.parse(parse_request.data)
-        
         return {
             "success": True,
             "count": len(cards),
@@ -735,92 +621,59 @@ async def parse_only(parse_request: ParseRequest):
                     "phone": card.phone,
                     "country": card.country,
                     "zip": card.zip
-                }
-                for card in cards
+                } for card in cards
             ]
         }
-        
     except Exception as e:
         logger.error(f'❌ Parse hatası: {str(e)}')
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/api/v1/bin/{card_number}", tags=["BIN"])
 async def bin_check(card_number: str):
     try:
         if not mongo_db:
             raise HTTPException(status_code=500, detail="MongoDB bağlantısı yok")
-        
         bin_info = mongo_db.get_bin_info(card_number.replace(' ', ''))
-        
         if not bin_info:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error": "BIN bulunamadı",
-                    "bin_prefix": card_number[:6]
-                }
-            )
-        
-        return {
-            "success": True,
-            "bin_info": bin_info
-        }
-        
+            raise HTTPException(status_code=404, detail={"error": "BIN bulunamadı", "bin_prefix": card_number[:6]})
+        return {"success": True, "bin_info": bin_info}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f'❌ BIN API hatası: {str(e)}')
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/api/v1/check/{check_id}", tags=["Records"])
 async def get_check_record(check_id: str):
     try:
         if not mongo_db:
             raise HTTPException(status_code=500, detail="MongoDB bağlantısı yok")
-        
         record = mongo_db.get_record(check_id)
-        
         if not record:
             raise HTTPException(status_code=404, detail="Kayıt bulunamadı")
-        
-        return {
-            "success": True,
-            "record": record
-        }
-        
+        return {"success": True, "record": record}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f'❌ Sorgulama hatası: {str(e)}')
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/api/v1/stats", tags=["Stats"])
 async def get_stats():
     try:
         if not mongo_db:
             raise HTTPException(status_code=500, detail="MongoDB bağlantısı yok")
-        
         stats = mongo_db.get_stats()
-        
-        return {
-            "success": True,
-            "stats": stats
-        }
-        
+        return {"success": True, "stats": stats}
     except Exception as e:
         logger.error(f'❌ İstatistik hatası: {str(e)}')
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ==================== SUNUCUYU BAŞLAT ====================
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 3000))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
-    
     print('=' * 60)
     print('🏦 PayPal Card Checker API (Vault Setup Tokens)')
     print('=' * 60)
@@ -832,11 +685,4 @@ if __name__ == '__main__':
     print(f'💳 PayPal Vault Setup Tokens (0$ doğrulama)')
     print(f'🔐 PayPal Client ID: {CONFIG["paypal_client_id"][:10]}...')
     print('=' * 60)
-    
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=debug,
-        log_level="info"
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=debug, log_level="info")
