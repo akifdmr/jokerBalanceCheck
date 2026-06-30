@@ -63,11 +63,12 @@ class BatchCardRequest(BaseModel):
 class ParseRequest(BaseModel):
     data: Union[str, List, Dict] = Field(...)
 
-# ==================== KONFIGÜRASYON ====================
+# ==================== KONFIGÜRASYON (YENİ TOKEN'LAR) ====================
 CONFIG = {
     'merchant_id': '518993421163932',
-    'public_token': '0c61457d01450a5e05bbc10068483a70',
-    'private_token': 'c7ee250b-e9ae-ab59-ba52-616ecc63ed29',
+    'public_token': 'cc5f1f800dad9399d3e46aca8da49d8f',  # YENİ
+    'private_token': 'f676c54d-3f3d-7456-870e-bd748207d6df',  # YENİ - charge yetkili
+    'api_token': '1271ec57-b9a5-481d-9ac4-60d8cfa02e0e',  # YENİ - yedek
     'api_base': 'https://api.clover.com',
     'token_api': 'https://token.clover.com',
     'charge_endpoint': 'https://www.clover.com/scl/v1/merchant/YHQFFZ1ZDDT61/charge',
@@ -394,7 +395,8 @@ class CloverProcessor:
     def __init__(self):
         self.merchant_id = CONFIG['merchant_id']
         self.public_token = CONFIG['public_token']
-        self.private_token = CONFIG['private_token']
+        self.private_token = CONFIG['private_token']  # YENİ
+        self.api_token = CONFIG['api_token']  # YENİ - yedek
         self.token_api = CONFIG['token_api']
         self.charge_endpoint = CONFIG['charge_endpoint']
         self.company_id = CONFIG['company_id']
@@ -468,14 +470,21 @@ class CloverProcessor:
                 'custom_attributes': {}
             }
             
+            # Önce private token ile dene
             headers = {
                 'Authorization': f'Bearer {self.private_token}',
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/plain, */*',
+                'Origin': 'https://www.clover.com',
+                'Referer': 'https://www.clover.com/',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
             }
             
             logger.info(f'🔄 0$ Charge işlemi başlatılıyor...')
             logger.info(f'📇 Kart: {card.get_masked()}')
             logger.info(f'🔑 Token: {token}')
+            logger.info(f'🔐 Private Token: {self.private_token[:10]}...')
+            logger.info(f'📤 Payload: {json.dumps(payload)}')
             
             response = requests.post(charge_url, json=payload, headers=headers)
             
@@ -486,6 +495,28 @@ class CloverProcessor:
                 logger.info(f'✅ 0$ Charge başarılı!')
                 logger.info(f'📋 Charge ID: {result.get("id")}')
                 return True, result.get('id'), None, result
+            elif response.status_code == 401 and self.api_token:
+                # Private token çalışmadı, api_token ile dene
+                logger.warning(f'⚠️ Private token 401 verdi, API token deneniyor...')
+                headers['Authorization'] = f'Bearer {self.api_token}'
+                response = requests.post(charge_url, json=payload, headers=headers)
+                logger.info(f'📊 API Token Response Status: {response.status_code}')
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    logger.info(f'✅ API Token ile 0$ Charge başarılı!')
+                    logger.info(f'📋 Charge ID: {result.get("id")}')
+                    return True, result.get('id'), None, result
+                else:
+                    error_text = response.text
+                    try:
+                        error_json = response.json()
+                        error_text = error_json.get('message', error_text)
+                    except:
+                        pass
+                    error_msg = f"HTTP {response.status_code}: {error_text}"
+                    logger.error(f'❌ API Token Charge hatası: {error_msg}')
+                    return False, None, error_msg, response.json()
             else:
                 error_text = response.text
                 try:
@@ -637,6 +668,10 @@ async def health_check():
         "version": "7.0.0",
         "environment": "LIVE",
         "mongodb": mongo_status,
+        "clover": {
+            "merchant_id": CONFIG['merchant_id'][:4] + '***',
+            "charge_endpoint": CONFIG['charge_endpoint']
+        },
         "endpoints": [
             "POST /api/v1/check - Kart kontrolü (0$ charge)",
             "POST /api/v1/check/batch - Toplu kart kontrolü",
@@ -833,6 +868,7 @@ if __name__ == '__main__':
     print(f'🔧 Debug: {debug}')
     print(f'🌍 Environment: LIVE')
     print(f'💰 Charge Miktarı: 0$ (Doğrulama)')
+    print(f'🔐 Private Token: {CONFIG["private_token"][:10]}...')
     print('=' * 60)
     
     uvicorn.run(
