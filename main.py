@@ -390,7 +390,7 @@ def detect_card_brand(card_number: str) -> str:
     return 'UNKNOWN'
 
 
-# ==================== PAYPAL PROCESSOR ====================
+# ==================== PAYPAL PROCESSOR (DÜZELTİLMİŞ) ====================
 
 class PayPalProcessor:
     def __init__(self):
@@ -438,27 +438,34 @@ class PayPalProcessor:
             country_code = bin_info.get("isoCode2", "US") if bin_info else "US"
             zip_code = "00000"
 
-            # İsim ayrıştırma
+            # İsim ayrıştırma ve temizleme
             first_name = "Test"
             last_name = "User"
             if card.name:
-                parts = card.name.split()
+                parts = card.name.strip().split()
                 if len(parts) >= 2:
                     first_name = parts[0]
                     last_name = " ".join(parts[1:])
                 elif len(parts) == 1:
                     first_name = parts[0]
                     last_name = "User"
+            # Özel karakterleri temizle
+            first_name = re.sub(r'[^a-zA-Z0-9\s-]', '', first_name)
+            last_name = re.sub(r'[^a-zA-Z0-9\s-]', '', last_name)
 
             # Expiry: YYYY-MM
             expiry = f"{card.exp_year}-{card.exp_month}"
 
+            # Kart numarası ve CVC'yi temizle
+            number = re.sub(r'[^0-9]', '', card.number)
+            cvc = re.sub(r'[^0-9]', '', card.cvc)
+
             payload = {
                 "payment_source": {
                     "card": {
-                        "number": card.number.strip(),
+                        "number": number,
                         "expiry": expiry,
-                        "security_code": card.cvc.strip(),
+                        "security_code": cvc,
                         "name": {
                             "given_name": first_name,
                             "surname": last_name
