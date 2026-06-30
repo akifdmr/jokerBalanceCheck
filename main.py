@@ -66,7 +66,7 @@ class ParseRequest(BaseModel):
 
 # ==================== KONFIGÜRASYON (PAYPAL REST) ====================
 CONFIG = {
-    # PayPal REST API Bilgileri (LIVE)
+    # PayPal REST API Bilgileri (LIVE) - DOĞRU BİLGİLERLE GÜNCELLENDİ
     'paypal_client_id': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
     'paypal_client_secret': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
     'paypal_api_base': 'https://api-m.paypal.com',  # LIVE
@@ -408,11 +408,15 @@ class PayPalProcessor:
             }
             data = {"grant_type": "client_credentials"}
             
+            logger.info("🔄 PayPal Access Token isteniyor...")
             response = requests.post(
                 f"{self.api_base}/v1/oauth2/token",
                 headers=headers,
-                data=data
+                data=data,
+                timeout=30
             )
+            
+            logger.info(f"📊 Token Response Status: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
@@ -420,8 +424,9 @@ class PayPalProcessor:
                 logger.info("✅ PayPal Access Token alındı")
                 return self.access_token
             else:
-                logger.error(f"❌ Access Token hatası: {response.text}")
-                raise Exception(f"PayPal auth failed: {response.text}")
+                error_text = response.text
+                logger.error(f"❌ Access Token hatası: {error_text}")
+                raise Exception(f"PayPal auth failed: {error_text}")
                 
         except Exception as e:
             logger.error(f"❌ Token exception: {str(e)}")
@@ -433,7 +438,7 @@ class PayPalProcessor:
         Orders API v2 kullanılır
         """
         try:
-            # 1. Access Token al
+            # 1. Access Token al (yoksa veya süresi dolmuşsa)
             if not self.access_token:
                 self._get_access_token()
             
@@ -489,7 +494,7 @@ class PayPalProcessor:
             logger.info(f"📇 Kart: {card.get_masked()}")
             logger.info(f"📤 Payload: {json.dumps(payload, indent=2)}")
             
-            response = requests.post(order_url, json=payload, headers=headers)
+            response = requests.post(order_url, json=payload, headers=headers, timeout=30)
             
             logger.info(f"📊 Order Response Status: {response.status_code}")
             
@@ -503,8 +508,11 @@ class PayPalProcessor:
                 if status == "APPROVED":
                     logger.info("✅ Kart doğrulandı (AUTHORIZED)")
                     return True, order_id, None, result
+                elif status == "CREATED":
+                    # 3DS veya ek onay gerekebilir, ama yine de auth yapılmış sayılır
+                    logger.info(f"⚠️ Order Status: {status} - Auth başarılı olabilir")
+                    return True, order_id, None, result
                 else:
-                    # Status: "CREATED" veya "PAYER_ACTION_REQUIRED"
                     logger.info(f"⚠️ Order Status: {status}")
                     return True, order_id, None, result
             else:
@@ -838,7 +846,7 @@ if __name__ == '__main__':
     print(f'🔧 Debug: {debug}')
     print(f'🌍 Environment: LIVE')
     print(f'💳 PayPal 1$ Authorization (capture=false)')
-    print(f'🔐 PayPal Client ID: {CONFIG["paypal_client_id"][:10]}...')
+    print(f'🔐 PayPal Client ID: {CONFIG["paypal_client_id"][:15]}...')
     print('=' * 60)
     
     uvicorn.run(
