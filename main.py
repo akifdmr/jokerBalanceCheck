@@ -66,9 +66,9 @@ class ParseRequest(BaseModel):
 # ==================== KONFIGÜRASYON (YENİ TOKEN'LAR) ====================
 CONFIG = {
     'merchant_id': '518993421163932',
-    'public_token': 'cc5f1f800dad9399d3e46aca8da49d8f',  # YENİ
-    'private_token': 'f676c54d-3f3d-7456-870e-bd748207d6df',  # YENİ - charge yetkili
-    'api_token': '1271ec57-b9a5-481d-9ac4-60d8cfa02e0e',  # YENİ - yedek
+    'public_token': 'ede19e1b042d053ddfea06f8f206fb22',  # YENİ
+    'private_token': 'cc43c8d1-7813-fad4-4d3a-7bd733ba1fd6',  # YENİ - charge yetkili
+    'api_token': '1271ec57-b9a5-481d-9ac4-60d8cfa02e0e',  # Yedek
     'api_base': 'https://api.clover.com',
     'token_api': 'https://token.clover.com',
     'charge_endpoint': 'https://www.clover.com/scl/v1/merchant/YHQFFZ1ZDDT61/charge',
@@ -395,8 +395,8 @@ class CloverProcessor:
     def __init__(self):
         self.merchant_id = CONFIG['merchant_id']
         self.public_token = CONFIG['public_token']
-        self.private_token = CONFIG['private_token']  # YENİ
-        self.api_token = CONFIG['api_token']  # YENİ - yedek
+        self.private_token = CONFIG['private_token']
+        self.api_token = CONFIG['api_token']
         self.token_api = CONFIG['token_api']
         self.charge_endpoint = CONFIG['charge_endpoint']
         self.company_id = CONFIG['company_id']
@@ -868,6 +868,7 @@ if __name__ == '__main__':
     print(f'🔧 Debug: {debug}')
     print(f'🌍 Environment: LIVE')
     print(f'💰 Charge Miktarı: 0$ (Doğrulama)')
+    print(f'🔐 Public Token: {CONFIG["public_token"][:10]}...')
     print(f'🔐 Private Token: {CONFIG["private_token"][:10]}...')
     print('=' * 60)
     
