@@ -1,13 +1,6 @@
 """
-CLOVER CARD CHECKER API - SON VERSİYON
-Özellikler:
-- Otomatik Parser (JSON, Pipe, CSV, Full Pipe)
-- BIN Check (MongoDB'den)
-- 0$ Capture (Clover Charge API - Çoklu Endpoint Desteği)
-- MongoDB Kayıt (card_checks, binList)
-- Tekil ve Toplu İşlem
-- Render/Heroku/Cloud Uyumlu
-- Hata Yönetimi ve Loglama
+CLOVER CARD CHECKER API - 0$ CHARGE VERSION
+0$ charge ile kart doğrulama
 """
 import os
 import re
@@ -24,10 +17,8 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 
-# .env dosyasını yükle
 load_dotenv()
 
-# Logging ayarları
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -56,7 +47,6 @@ CONFIG = {
 
 @dataclass
 class CardData:
-    """Standart kart verisi modeli"""
     number: str
     exp_month: str
     exp_year: str
@@ -72,17 +62,14 @@ class CardData:
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def get_masked(self) -> str:
-        """Maskeli kart numarası"""
         return f"{self.number[:4]}****{self.number[-4:]}"
     
     def get_bin(self) -> str:
-        """BIN prefix'ini döndür"""
         return self.number[:6]
 
 
 @dataclass
 class ProcessingResult:
-    """İşlem sonucu"""
     card: CardData
     success: bool
     status: str
@@ -97,7 +84,6 @@ class ProcessingResult:
     raw_response: Optional[Dict] = None
     
     def to_dict(self) -> Dict:
-        """Dict'e çevir"""
         return {
             'success': self.success,
             'status': self.status,
@@ -118,31 +104,14 @@ class ProcessingResult:
 # ==================== PARSER ====================
 
 class CardParser:
-    """Farklı formatlardaki kart verilerini parse eden sınıf"""
-    
     @staticmethod
     def parse(data: Union[str, List, Dict]) -> List[CardData]:
-        """
-        Ana parse fonksiyonu - otomatik format tespiti
-        
-        Desteklenen formatlar:
-        - JSON: {"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}
-        - JSON Array: [{"number": "...", ...}]
-        - CreditCard Wrapper: {"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}
-        - CardInfo Wrapper: {"CardInfo": {"CardNumber": "...", "Expiration": "...", "CVV": "..."}}
-        - Pipe: "number|month|year|cvc"
-        - Full Pipe: "number|month|year|cvc|name|...|email|phone|dob|ip|user_agent"
-        - CSV: "CardNumber,Expiry,CVV"
-        """
-        # JSON ise
         if isinstance(data, (list, dict)):
             return CardParser._parse_json(data)
         
-        # String ise
         if isinstance(data, str):
             data = data.strip()
             
-            # JSON string kontrolü
             if data.startswith('[') or data.startswith('{'):
                 try:
                     json_data = json.loads(data)
@@ -150,14 +119,12 @@ class CardParser:
                 except:
                     pass
             
-            # Pipe formatı
             if '|' in data:
                 if len(data.split('|')) > 10:
                     return CardParser._parse_full_pipe(data)
                 else:
                     return CardParser._parse_pipe(data)
             
-            # CSV formatı
             if ',' in data and '\n' in data:
                 return CardParser._parse_csv(data)
         
@@ -165,7 +132,6 @@ class CardParser:
     
     @staticmethod
     def _parse_pipe(data: str) -> List[CardData]:
-        """Pipe (|) ile ayrılmış formatı parse et"""
         cards = []
         lines = data.strip().split('\n')
         
@@ -195,7 +161,6 @@ class CardParser:
     
     @staticmethod
     def _parse_full_pipe(data: str) -> List[CardData]:
-        """Tam pipe formatını parse et (kişisel bilgiler içerir)"""
         cards = []
         lines = data.strip().split('\n')
         
@@ -238,7 +203,6 @@ class CardParser:
     
     @staticmethod
     def _parse_csv(data: str) -> List[CardData]:
-        """CSV formatını parse et"""
         cards = []
         lines = data.strip().split('\n')
         
@@ -273,7 +237,6 @@ class CardParser:
     
     @staticmethod
     def _parse_json(data: Union[List, Dict]) -> List[CardData]:
-        """JSON formatını parse et"""
         cards = []
         
         if not isinstance(data, list):
@@ -288,7 +251,6 @@ class CardParser:
     
     @staticmethod
     def _parse_expiration(exp_str: str) -> Tuple[Optional[str], Optional[str]]:
-        """Çeşitli tarih formatlarını parse et"""
         exp_str = exp_str.strip()
         
         separators = ['/', '-', '|', ' ']
@@ -315,8 +277,6 @@ class CardParser:
     
     @staticmethod
     def _extract_from_json_item(item: Dict) -> Optional[CardData]:
-        """JSON objesinden kart verisini çıkar"""
-        
         if 'number' in item:
             number = item['number']
             exp_month = item.get('exp_month') or item.get('month')
@@ -378,7 +338,6 @@ class MongoDB:
         return cls._instance
     
     def _initialize(self):
-        """MongoDB bağlantısını başlat"""
         try:
             self.client = MongoClient(CONFIG['mongo_uri'])
             self.client.admin.command('ping')
@@ -402,7 +361,6 @@ class MongoDB:
             raise
     
     def get_bin_info(self, card_number: str) -> Optional[Dict]:
-        """Kart numarasından BIN bilgilerini sorgula"""
         try:
             bin_prefixes = [card_number[:6], card_number[:5], card_number[:4]]
             
@@ -420,7 +378,6 @@ class MongoDB:
             return None
     
     def insert_record(self, data: Dict) -> str:
-        """Kayıt ekle"""
         try:
             if 'created_at' not in data:
                 data['created_at'] = datetime.now().isoformat()
@@ -436,7 +393,6 @@ class MongoDB:
             raise
     
     def get_record(self, check_id: str) -> Optional[Dict]:
-        """Kayıt getir"""
         try:
             result = self.collection.find_one({'check_id': check_id})
             if result and '_id' in result:
@@ -445,28 +401,8 @@ class MongoDB:
         except Exception as e:
             logger.error(f'❌ Kayıt getirme hatası: {str(e)}')
             raise
-    
-    def get_stats(self) -> Dict:
-        """İstatistik getir"""
-        try:
-            total = self.collection.count_documents({})
-            
-            from datetime import datetime, timedelta
-            last_24h = datetime.now() - timedelta(days=1)
-            last_24h_count = self.collection.count_documents({
-                'created_at': {'$gte': last_24h.isoformat()}
-            })
-            
-            return {
-                'total_records': total,
-                'last_24h': last_24h_count
-            }
-        except Exception as e:
-            logger.error(f'❌ İstatistik hatası: {str(e)}')
-            raise
 
 
-# MongoDB instance
 try:
     mongo_db = MongoDB()
 except Exception as e:
@@ -477,8 +413,6 @@ except Exception as e:
 # ==================== CLOVER PROCESSOR ====================
 
 class CloverProcessor:
-    """Clover API işlemleri - 0$ Capture=true ile - Çoklu Endpoint Desteği"""
-    
     def __init__(self):
         self.merchant_id = CONFIG['merchant_id']
         self.public_token = CONFIG['public_token']
@@ -488,16 +422,7 @@ class CloverProcessor:
         self.company_id = CONFIG['company_id']
         self.api_base = CONFIG['api_base']
         
-        # Farklı charge endpoint'leri (denenecek)
-        self.charge_endpoints = [
-            self.charge_endpoint,  # Mevcut: https://www.clover.com/scl/v1/merchant/YHQFFZ1ZDDT61/charge
-            f"{self.api_base}/v1/merchants/{self.merchant_id}/charges",
-            f"{self.api_base}/v1/merchants/{self.merchant_id}/payments",
-            f"{self.charge_endpoint}?companyId={self.company_id}&companyType=merchant",
-        ]
-        
     def create_token(self, card: CardData) -> Tuple[bool, Optional[str], Optional[str]]:
-        """Clover token oluştur"""
         try:
             token_url = f"{self.token_api}/v1/tokens"
             
@@ -530,77 +455,65 @@ class CloverProcessor:
     
     def charge_zero_dollar(self, token: str, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
         """
-        0$ Capture=true ile charge işlemi yap
-        Birden fazla endpoint dener
+        0$ Charge işlemi - Başarılı payload ile
         """
-        errors = []
-        
-        for idx, endpoint in enumerate(self.charge_endpoints):
-            try:
-                logger.info(f'🔄 Deneme {idx+1}/{len(self.charge_endpoints)}: {endpoint}')
-                
-                # Payload oluştur
-                payload = {
-                    'amount': 0,
-                    'capture': True,
-                    'currency': 'USD',
-                    'source': token,
-                    'metadata': {
-                        'vt_payment_type': 'vt_checkout',
-                        'source_app': 'com.clover.virtualterminal',
-                        'card_last4': card.number[-4:],
-                        'card_brand': bin_info.get('Brand') if bin_info else detect_card_brand(card.number),
-                        'bin_prefix': card.number[:6],
-                        'check_type': 'zero_dollar_verification'
-                    }
+        try:
+            charge_url = f"{self.charge_endpoint}?companyId={self.company_id}&companyType=merchant"
+            
+            # 0$ charge payload (başarılı olan)
+            payload = {
+                'amount': 0,
+                'capture': True,
+                'tax_rate_uuid': 'FY6ZPX2PMQZM8',
+                'currency': 'USD',
+                'ecomind': 'moto',
+                'source': token,
+                'custom_attributes': {},
+                'metadata': {
+                    'vt_payment_type': 'vt_checkout',
+                    'source_app': 'com.clover.virtualterminal',
+                    'card_last4': card.number[-4:],
+                    'card_brand': bin_info.get('Brand') if bin_info else detect_card_brand(card.number),
+                    'bin_prefix': card.number[:6],
+                    'check_type': 'zero_dollar_verification'
                 }
+            }
+            
+            headers = {
+                'Authorization': f'Bearer {self.private_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            logger.info(f'🔄 0$ Charge işlemi başlatılıyor...')
+            logger.info(f'📇 Kart: {card.get_masked()}')
+            logger.info(f'🔑 Token: {token}')
+            
+            response = requests.post(charge_url, json=payload, headers=headers)
+            
+            logger.info(f'📊 Response Status: {response.status_code}')
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f'✅ 0$ Charge başarılı!')
+                logger.info(f'📋 Charge ID: {result.get("id")}')
+                return True, result.get('id'), None, result
+            else:
+                error_text = response.text
+                try:
+                    error_json = response.json()
+                    error_text = error_json.get('message', error_text)
+                except:
+                    pass
                 
-                # SCL endpoint'i için özel parametreler
-                if 'scl' in endpoint or 'clover.com/scl' in endpoint:
-                    payload['tax_rate_uuid'] = 'FY6ZPX2PMQZM8'
-                    payload['ecomind'] = 'moto'
-                    # URL zaten query string içeriyorsa ekleme
-                    if '?' not in endpoint:
-                        endpoint = f"{endpoint}?companyId={self.company_id}&companyType=merchant"
+                error_msg = f"HTTP {response.status_code}: {error_text}"
+                logger.error(f'❌ Charge hatası: {error_msg}')
+                return False, None, error_msg, response.json()
                 
-                headers = {
-                    'Authorization': f'Bearer {self.private_token}',
-                    'Content-Type': 'application/json'
-                }
-                
-                logger.info(f'📤 Payload: {json.dumps(payload, indent=2)}')
-                
-                response = requests.post(endpoint, json=payload, headers=headers)
-                
-                logger.info(f'📊 Response Status: {response.status_code}')
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    logger.info(f'✅ 0$ Charge başarılı! Endpoint: {endpoint}')
-                    logger.info(f'📋 Charge ID: {result.get("id")}')
-                    return True, result.get('id'), None, result
-                else:
-                    error_text = response.text
-                    try:
-                        error_json = response.json()
-                        error_text = error_json.get('message', error_text)
-                    except:
-                        pass
-                    
-                    error_msg = f"HTTP {response.status_code}: {error_text}"
-                    logger.warning(f'⚠️ Endpoint başarısız: {error_msg}')
-                    errors.append(f"Endpoint {idx+1}: {error_msg}")
-                    
-            except Exception as e:
-                error_msg = str(e)
-                logger.warning(f'⚠️ Endpoint hatası: {error_msg}')
-                errors.append(f"Endpoint {idx+1}: {error_msg}")
-        
-        # Tüm endpoint'ler başarısız
-        return False, None, " | ".join(errors), None
+        except Exception as e:
+            logger.error(f'❌ Charge exception: {str(e)}')
+            return False, None, str(e), None
     
     def process_card(self, card: CardData) -> ProcessingResult:
-        """Kartı Clover ile işle - 0$ Capture=true"""
         check_id = str(uuid.uuid4())
         
         try:
@@ -641,17 +554,17 @@ class CloverProcessor:
             
             logger.info(f'✅ Token oluşturuldu: {token}')
             
-            # 3. 0$ Charge (capture=true) - Çoklu endpoint dene
-            logger.info('🔄 Adım 2/2: 0$ Capture işlemi yapılıyor...')
+            # 3. 0$ Charge
+            logger.info('🔄 Adım 2/2: 0$ Charge işlemi yapılıyor...')
             success, charge_id, error, raw_response = self.charge_zero_dollar(token, card, bin_info)
             
             if not success:
-                logger.error(f'❌ 0$ Capture başarısız: {error}')
+                logger.error(f'❌ 0$ Charge başarısız: {error}')
                 return ProcessingResult(
                     card=card,
                     success=False,
                     status='CHARGE_FAILED',
-                    message='0$ Capture başarısız',
+                    message='0$ Charge başarısız',
                     error=error,
                     token=token,
                     bin_info=bin_info,
@@ -659,7 +572,7 @@ class CloverProcessor:
                     raw_response=raw_response
                 )
             
-            logger.info(f'✅ 0$ Capture başarılı! Charge ID: {charge_id}')
+            logger.info(f'✅ 0$ Charge başarılı! Charge ID: {charge_id}')
             
             # 4. MongoDB'ye kaydet
             if mongo_db:
@@ -681,7 +594,7 @@ class CloverProcessor:
                     'amount': 0,
                     'currency': 'USD',
                     'status': 'CAPTURED',
-                    'response_message': 'Kart başarıyla doğrulandı (0$ capture)',
+                    'response_message': 'Kart başarıyla doğrulandı (0$ charge)',
                     'is_zero_dollar': True,
                     'raw_response': json.dumps(raw_response) if raw_response else None
                 }
@@ -691,7 +604,7 @@ class CloverProcessor:
                 card=card,
                 success=True,
                 status='CAPTURED',
-                message='Kart başarıyla doğrulandı (0$ capture)',
+                message='Kart başarıyla doğrulandı (0$ charge)',
                 token=token,
                 charge_id=charge_id,
                 bin_info=bin_info,
@@ -716,7 +629,6 @@ class CloverProcessor:
 # ==================== YARDIMCI FONKSİYONLAR ====================
 
 def detect_card_brand(card_number: str) -> str:
-    """Kart markasını tespit et"""
     patterns = {
         'VISA': r'^4',
         'MASTERCARD': r'^(5[1-5]|2[2-7])',
@@ -732,7 +644,6 @@ def detect_card_brand(card_number: str) -> str:
 
 
 def parse_card_data(data: Union[str, List, Dict]) -> List[CardData]:
-    """Ana parser fonksiyonu"""
     return CardParser.parse(data)
 
 
@@ -741,7 +652,6 @@ def parse_card_data(data: Union[str, List, Dict]) -> List[CardData]:
 @app.route('/api/v1/check', methods=['POST'])
 @app.route('/api/v1/single', methods=['POST'])
 def check_card():
-    """Kart kontrolü - Parser + BIN Check + Clover 0$ Capture=true"""
     try:
         data = request.get_json()
         
@@ -790,7 +700,6 @@ def check_card():
 
 @app.route('/api/v1/check/batch', methods=['POST'])
 def check_cards_batch():
-    """Birden fazla kartı kontrol et"""
     try:
         data = request.get_json()
         
@@ -834,7 +743,6 @@ def check_cards_batch():
 
 @app.route('/api/v1/parse', methods=['POST'])
 def parse_only():
-    """Sadece parser test et"""
     try:
         data = request.get_json()
         
@@ -875,7 +783,6 @@ def parse_only():
 
 @app.route('/api/v1/bin/<card_number>', methods=['GET'])
 def bin_check(card_number: str):
-    """BIN kontrolü"""
     try:
         if not mongo_db:
             return jsonify({
@@ -907,7 +814,6 @@ def bin_check(card_number: str):
 
 @app.route('/api/v1/check/<check_id>', methods=['GET'])
 def get_check_record(check_id: str):
-    """Kayıt sorgula"""
     try:
         if not mongo_db:
             return jsonify({
@@ -938,7 +844,6 @@ def get_check_record(check_id: str):
 
 @app.route('/api/v1/stats', methods=['GET'])
 def get_stats():
-    """İstatistikleri getir"""
     try:
         if not mongo_db:
             return jsonify({
@@ -963,14 +868,13 @@ def get_stats():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Sağlık kontrolü"""
     mongo_status = 'connected' if mongo_db else 'disconnected'
     
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'service': 'Clover Card Check API (0$ Capture)',
-        'version': '5.0.0',
+        'service': 'Clover Card Check API (0$ Charge)',
+        'version': '6.0.0',
         'environment': 'LIVE',
         'mongodb': mongo_status,
         'clover': {
@@ -978,7 +882,7 @@ def health_check():
             'charge_endpoint': CONFIG['charge_endpoint']
         },
         'endpoints': [
-            'POST /api/v1/check - Kart kontrolü (0$ capture)',
+            'POST /api/v1/check - Kart kontrolü (0$ charge)',
             'POST /api/v1/check/batch - Toplu kart kontrolü',
             'POST /api/v1/parse - Sadece parse test',
             'GET /api/v1/bin/<card> - BIN kontrolü',
@@ -1021,7 +925,6 @@ def internal_error(error):
 
 # ==================== SUNUCUYU BAŞLAT ====================
 
-# Render/Heroku/Cloud için uygulama nesnesi
 application = app
 
 if __name__ == '__main__':
@@ -1029,36 +932,21 @@ if __name__ == '__main__':
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
     print('=' * 60)
-    print('🏦 Clover Card Checker API (SON VERSİYON)')
+    print('🏦 Clover Card Checker API (0$ Charge)')
     print('=' * 60)
     print(f'📍 Sunucu: http://localhost:{port}')
     print(f'🔧 Debug: {debug}')
     print(f'🌍 Environment: LIVE')
+    print(f'💰 Charge Miktarı: 0$ (Doğrulama)')
     
     print('\n📋 API Endpoint\'leri:')
-    print('  POST /api/v1/check        - Kart kontrolü (0$ capture)')
+    print('  POST /api/v1/check        - Kart kontrolü (0$ charge)')
     print('  POST /api/v1/check/batch  - Toplu kart kontrolü')
     print('  POST /api/v1/parse        - Sadece parse test')
     print('  GET  /api/v1/bin/<card>   - BIN kontrolü')
     print('  GET  /api/v1/check/<id>   - Kayıt sorgula')
     print('  GET  /api/v1/stats        - İstatistikler')
     print('  GET  /health              - Sağlık kontrolü')
-    
-    print('\n📝 Desteklenen Formatlar:')
-    print('  ✅ JSON: {"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}')
-    print('  ✅ Pipe: "number|month|year|cvc"')
-    print('  ✅ JSON Array: [{"number": "...", ...}]')
-    print('  ✅ CreditCard: {"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}')
-    print('  ✅ CardInfo: {"CardInfo": {"CardNumber": "...", "Expiration": "...", "CVV": "..."}}')
-    print('  ✅ CSV: "CardNumber,Expiry,CVV"')
-    print('  ✅ Full Pipe: "number|month|year|cvc|name|...|email|phone|dob|ip|user_agent"')
-    
-    print('\n💳 0$ Capture Akışı:')
-    print('  1. Kart verisi parse edilir (otomatik format tespiti)')
-    print('  2. BIN check yapılır (MongoDB)')
-    print('  3. Token oluşturulur (Clover)')
-    print('  4. 0$ Capture=true charge yapılır (Çoklu endpoint dener)')
-    print('  5. Sonuç MongoDB\'ye kaydedilir')
     print('=' * 60)
     
     app.run(host='0.0.0.0', port=port, debug=debug)
