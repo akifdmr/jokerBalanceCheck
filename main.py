@@ -1,6 +1,6 @@
 """
-CLOVER CARD CHECKER API - FASTAPI VERSION
-0$ PRE-AUTHORIZATION (capture=false)
+PAYPAL CARD CHECKER API - FASTAPI VERSION
+Sadece Authorization (capture=false) ile kart doğrulama
 Swagger Docs: /docs
 ReDoc: /redoc
 """
@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, validator
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 import uvicorn
+import base64
 
 # Logging ayarları
 logging.basicConfig(
@@ -35,8 +36,8 @@ class CardRequest(BaseModel):
     exp_year: str = Field(..., example="2026")
     cvc: str = Field(..., example="319")
     name: Optional[str] = "Test User"
-    country: Optional[str] = "US"
-    zip: Optional[str] = "00000"
+    country: Optional[str] = "TR"
+    zip: Optional[str] = "34000"
     email: Optional[str] = None
     phone: Optional[str] = None
     dob: Optional[str] = None
@@ -63,15 +64,15 @@ class BatchCardRequest(BaseModel):
 class ParseRequest(BaseModel):
     data: Union[str, List, Dict] = Field(...)
 
-# ==================== KONFIGÜRASYON ====================
+# ==================== KONFIGÜRASYON (PAYPAL REST) ====================
 CONFIG = {
-    'merchant_id': '518993421163932',
-    'public_token': 'ede19e1b042d053ddfea06f8f206fb22',
-    'private_token': 'cc43c8d1-7813-fad4-4d3a-7bd733ba1fd6',
-    'api_base': 'https://api.clover.com',
-    'token_api': 'https://token.clover.com',
-    'charge_endpoint': 'https://www.clover.com/scl/v1/merchant/YHQFFZ1ZDDT61/charge',
-    'company_id': 'YHQFFZ1ZDDT61',
+    # PayPal REST API Bilgileri (LIVE)
+    'paypal_client_id': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
+    'paypal_client_secret': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
+    'paypal_api_base': 'https://api-m.paypal.com',  # LIVE
+    # 'paypal_api_base': 'https://api-m.sandbox.paypal.com',  # Sandbox için
+    
+    # MongoDB
     'mongo_uri': 'mongodb+srv://cardmarketApp:gnbqHdTrlceMZjOS@paymentmanger.gvaavzc.mongodb.net/mydb?retryWrites=true&w=majority',
     'mongo_database': 'mydb',
     'mongo_collection': 'card_checks',
@@ -79,8 +80,8 @@ CONFIG = {
 }
 
 app = FastAPI(
-    title="Clover Card Checker API",
-    description="0$ Pre-Authorization (capture=false) ile Kart Doğrulama",
+    title="PayPal Card Checker API",
+    description="PayPal REST API ile Kart Doğrulama (Sadece Auth)",
     version="7.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -174,8 +175,8 @@ class CardData:
     exp_year: str
     cvc: str
     name: str = "Test User"
-    country: str = "US"
-    zip: str = "00000"
+    country: str = "TR"
+    zip: str = "34000"
     email: Optional[str] = None
     phone: Optional[str] = None
     dob: Optional[str] = None
@@ -374,7 +375,7 @@ class CardParser:
         return None
 
 
-# ==================== CLOVER PROCESSOR ====================
+# ==================== PAYPAL PROCESSOR ====================
 
 def detect_card_brand(card_number: str) -> str:
     patterns = {
@@ -390,125 +391,135 @@ def detect_card_brand(card_number: str) -> str:
     return 'UNKNOWN'
 
 
-class CloverProcessor:
+class PayPalProcessor:
     def __init__(self):
-        self.merchant_id = CONFIG['merchant_id']
-        self.public_token = CONFIG['public_token']
-        self.private_token = CONFIG['private_token']
-        self.token_api = CONFIG['token_api']
-        self.charge_endpoint = CONFIG['charge_endpoint']
-        self.company_id = CONFIG['company_id']
-    
-    def create_token(self, card: CardData) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
+        self.client_id = CONFIG['paypal_client_id']
+        self.client_secret = CONFIG['paypal_client_secret']
+        self.api_base = CONFIG['paypal_api_base']
+        self.access_token = None
+        
+    def _get_access_token(self) -> str:
+        """PayPal Access Token al"""
         try:
-            token_url = f"{self.token_api}/v1/tokens"
-            
-            brand = detect_card_brand(card.number)
-            if brand == "MASTERCARD":
-                brand = "MC"
-            
-            payload = {
-                "card": {
-                    "number": card.number,
-                    "exp_month": card.exp_month,
-                    "exp_year": card.exp_year,
-                    "cvv": card.cvc,
-                    "brand": brand,
-                    "address_zip": "00000"
-                },
-                "multipay": False
-            }
-            
-            logger.info(f'📤 Token payload: {json.dumps(payload)}')
-            
+            auth = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
             headers = {
-                'apikey': self.public_token,
-                'content-type': 'application/json'
+                "Authorization": f"Basic {auth}",
+                "Content-Type": "application/x-www-form-urlencoded"
             }
+            data = {"grant_type": "client_credentials"}
             
-            response = requests.post(token_url, json=payload, headers=headers)
-            
-            logger.info(f'📊 Token Response Status: {response.status_code}')
+            response = requests.post(
+                f"{self.api_base}/v1/oauth2/token",
+                headers=headers,
+                data=data
+            )
             
             if response.status_code == 200:
                 result = response.json()
-                logger.info(f'✅ Token başarılı: {result.get("id")}')
-                return True, result.get('id'), None, result
+                self.access_token = result.get("access_token")
+                logger.info("✅ PayPal Access Token alındı")
+                return self.access_token
             else:
-                error_text = response.text
-                try:
-                    error_json = response.json()
-                    error_text = error_json.get('message', error_text)
-                except:
-                    pass
-                logger.error(f'❌ Token hatası: {error_text}')
-                return False, None, error_text, response.json()
+                logger.error(f"❌ Access Token hatası: {response.text}")
+                raise Exception(f"PayPal auth failed: {response.text}")
                 
         except Exception as e:
-            logger.error(f'❌ Token exception: {str(e)}')
-            return False, None, str(e), None
+            logger.error(f"❌ Token exception: {str(e)}")
+            raise
     
-    def pre_auth_zero_dollar(self, token: str, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
+    def authorize_card(self, card: CardData) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
         """
-        0$ Pre-Authorization (capture=false)
-        Kartı doğrulamak için kullanılır, para çekilmez
+        PayPal ile kart doğrulama (sadece auth, capture yok)
+        Orders API v2 kullanılır
         """
         try:
-            charge_url = f"{self.charge_endpoint}?companyId={self.company_id}&companyType=merchant"
+            # 1. Access Token al
+            if not self.access_token:
+                self._get_access_token()
+            
+            # 2. Order oluştur (intent: AUTHORIZE)
+            order_url = f"{self.api_base}/v2/checkout/orders"
+            
+            # Kart bilgileri
+            exp = f"{card.exp_month}{card.exp_year}"  # MMYYYY formatında
+            
+            # Adres bilgileri
+            country = card.country or "TR"
+            zip_code = card.zip or "34000"
+            name_parts = card.name.split() if card.name else ["Test", "User"]
+            first_name = name_parts[0] if name_parts else "Test"
+            last_name = name_parts[-1] if len(name_parts) > 1 else "User"
             
             payload = {
-                'amount': 0,
-                'capture': False,  # ❌ capture=false = pre-authorization
-                'tax_rate_uuid': 'FY6ZPX2PMQZM8',
-                'description': '',
-                'currency': 'USD',
-                'metadata': {
-                    'vt_payment_type': 'vt_checkout',
-                    'source_app': 'com.clover.virtualterminal',
-                    'existingDebtIndicator': 'false'
-                },
-                'ecomind': 'moto',
-                'source': token,
-                'custom_attributes': {}
+                "intent": "AUTHORIZE",
+                "purchase_units": [
+                    {
+                        "amount": {
+                            "currency_code": "USD",
+                            "value": "1.00"  # 1$ auth (0$ desteklenmez)
+                        },
+                        "payment_source": {
+                            "card": {
+                                "number": card.number,
+                                "expiry": exp,
+                                "security_code": card.cvc,
+                                "name": {
+                                    "given_name": first_name,
+                                    "surname": last_name
+                                },
+                                "billing_address": {
+                                    "address_line_1": "123 Test Street",
+                                    "admin_area_2": "Istanbul",
+                                    "postal_code": zip_code,
+                                    "country_code": country
+                                }
+                            }
+                        }
+                    }
+                ]
             }
             
             headers = {
-                'Authorization': f'Bearer {self.private_token}',
-                'Content-Type': 'application/json',
-                'Accept': 'application/json, text/plain, */*',
-                'Origin': 'https://www.clover.com',
-                'Referer': 'https://www.clover.com/',
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                "PayPal-Request-Id": str(uuid.uuid4())
             }
             
-            logger.info(f'🔄 0$ Pre-Authorization işlemi başlatılıyor...')
-            logger.info(f'📇 Kart: {card.get_masked()}')
-            logger.info(f'🔑 Token: {token}')
-            logger.info(f'🔐 Private Token: {self.private_token[:10]}...')
-            logger.info(f'📤 Payload: {json.dumps(payload)}')
+            logger.info(f"🔄 PayPal Order oluşturuluyor...")
+            logger.info(f"📇 Kart: {card.get_masked()}")
+            logger.info(f"📤 Payload: {json.dumps(payload, indent=2)}")
             
-            response = requests.post(charge_url, json=payload, headers=headers)
+            response = requests.post(order_url, json=payload, headers=headers)
             
-            logger.info(f'📊 Response Status: {response.status_code}')
+            logger.info(f"📊 Order Response Status: {response.status_code}")
             
-            if response.status_code == 200:
+            if response.status_code in [200, 201]:
                 result = response.json()
-                logger.info(f'✅ 0$ Pre-Authorization başarılı! (capture=false)')
-                logger.info(f'📋 Auth ID: {result.get("id")}')
-                return True, result.get('id'), None, result
+                order_id = result.get("id")
+                status = result.get("status")
+                
+                logger.info(f"✅ Order oluşturuldu: {order_id}, Status: {status}")
+                
+                if status == "APPROVED":
+                    logger.info("✅ Kart doğrulandı (AUTHORIZED)")
+                    return True, order_id, None, result
+                else:
+                    # Status: "CREATED" veya "PAYER_ACTION_REQUIRED"
+                    logger.info(f"⚠️ Order Status: {status}")
+                    return True, order_id, None, result
             else:
                 error_text = response.text
                 try:
                     error_json = response.json()
-                    error_text = error_json.get('message', error_text)
+                    error_text = error_json.get("message", error_text)
                 except:
                     pass
                 error_msg = f"HTTP {response.status_code}: {error_text}"
-                logger.error(f'❌ Pre-Auth hatası: {error_msg}')
+                logger.error(f"❌ Order hatası: {error_msg}")
                 return False, None, error_msg, response.json()
                 
         except Exception as e:
-            logger.error(f'❌ Pre-Auth exception: {str(e)}')
+            logger.error(f"❌ PayPal exception: {str(e)}")
             return False, None, str(e), None
     
     def process_card(self, card: CardData) -> Dict:
@@ -534,46 +545,26 @@ class CloverProcessor:
                     'CountryName': ''
                 }
             
-            # 2. Token Oluştur
-            logger.info('🔄 Adım 1/2: Token oluşturuluyor...')
-            success, token, error, token_response = self.create_token(card)
+            # 2. PayPal Authorization (1$)
+            logger.info('🔄 PayPal Auth işlemi başlatılıyor...')
+            success, order_id, error, raw_response = self.authorize_card(card)
             
             if not success:
-                logger.error(f'❌ Token oluşturulamadı: {error}')
+                logger.error(f'❌ PayPal Auth başarısız: {error}')
                 return {
                     'success': False,
-                    'status': 'TOKEN_FAILED',
-                    'message': 'Token oluşturulamadı',
+                    'status': 'AUTH_FAILED',
+                    'message': 'PayPal Auth başarısız',
                     'error': error,
                     'bin_info': bin_info,
                     'check_id': check_id,
-                    'token': None,
-                    'auth_id': None
+                    'order_id': None,
+                    'raw_response': raw_response
                 }
             
-            logger.info(f'✅ Token oluşturuldu: {token}')
+            logger.info(f'✅ PayPal Auth başarılı! Order ID: {order_id}')
             
-            # 3. 0$ Pre-Authorization (capture=false)
-            logger.info('🔄 Adım 2/2: 0$ Pre-Authorization yapılıyor...')
-            success, auth_id, error, preauth_response = self.pre_auth_zero_dollar(token, card, bin_info)
-            
-            if not success:
-                logger.error(f'❌ 0$ Pre-Authorization başarısız: {error}')
-                return {
-                    'success': False,
-                    'status': 'PREAUTH_FAILED',
-                    'message': '0$ Pre-Authorization başarısız',
-                    'error': error,
-                    'token': token,
-                    'bin_info': bin_info,
-                    'check_id': check_id,
-                    'auth_id': None,
-                    'raw_response': preauth_response
-                }
-            
-            logger.info(f'✅ 0$ Pre-Authorization başarılı! Auth ID: {auth_id}')
-            
-            # 4. MongoDB'ye kaydet
+            # 3. MongoDB'ye kaydet
             if mongo_db:
                 record = {
                     'check_id': check_id,
@@ -588,30 +579,28 @@ class CloverProcessor:
                     'card_country_code': bin_info.get('isoCode2'),
                     'card_country_name': bin_info.get('CountryName'),
                     'bin_prefix': bin_info.get('BIN'),
-                    'token': token,
-                    'auth_id': auth_id,
-                    'amount': 0,
+                    'order_id': order_id,
+                    'amount': 1.00,
                     'currency': 'USD',
-                    'status': 'PRE_AUTHORIZED',
-                    'response_message': 'Kart başarıyla doğrulandı (0$ pre-auth, capture=false)',
-                    'is_zero_dollar': True,
+                    'status': 'AUTHORIZED',
+                    'response_message': 'Kart başarıyla doğrulandı (PayPal 1$ auth)',
+                    'is_zero_dollar': False,
                     'is_preauth': True,
-                    'raw_response': json.dumps(preauth_response) if preauth_response else None
+                    'raw_response': json.dumps(raw_response) if raw_response else None
                 }
                 mongo_db.insert_record(record)
             
             return {
                 'success': True,
-                'status': 'PRE_AUTHORIZED',
-                'message': 'Kart başarıyla doğrulandı (0$ pre-auth, capture=false)',
-                'token': token,
-                'auth_id': auth_id,
+                'status': 'AUTHORIZED',
+                'message': 'Kart başarıyla doğrulandı (PayPal 1$ auth)',
+                'order_id': order_id,
                 'bin_info': bin_info,
                 'check_id': check_id,
                 'card_masked': card.get_masked(),
                 'card_brand': bin_info.get('Brand'),
                 'card_last4': card.number[-4:],
-                'amount': 0,
+                'amount': 1.00,
                 'currency': 'USD',
                 'capture': False
             }
@@ -632,7 +621,7 @@ class CloverProcessor:
 @app.get("/", tags=["Root"])
 async def root():
     return {
-        "message": "Clover Card Checker API (0$ Pre-Auth)",
+        "message": "PayPal Card Checker API (Sadece Auth)",
         "docs": "/docs",
         "redoc": "/redoc",
         "health": "/health",
@@ -646,16 +635,16 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "Clover Card Check API (0$ Pre-Auth)",
+        "service": "PayPal Card Check API (Auth Only)",
         "version": "7.0.0",
         "environment": "LIVE",
         "mongodb": mongo_status,
-        "clover": {
-            "merchant_id": CONFIG['merchant_id'][:4] + '***'
+        "paypal": {
+            "api_base": CONFIG['paypal_api_base']
         },
         "endpoints": [
-            "POST /api/v1/check - 0$ Pre-Auth (capture=false)",
-            "POST /api/v1/check/batch - Toplu 0$ Pre-Auth",
+            "POST /api/v1/check - PayPal Auth (1$)",
+            "POST /api/v1/check/batch - Toplu PayPal Auth",
             "POST /api/v1/parse - Sadece parse test",
             "GET /api/v1/bin/{card} - BIN kontrolü",
             "GET /api/v1/check/{id} - Kayıt sorgula",
@@ -674,8 +663,8 @@ async def check_card(card_request: CardRequest):
             exp_year=card_request.exp_year,
             cvc=card_request.cvc,
             name=card_request.name or "Test User",
-            country=card_request.country or "US",
-            zip=card_request.zip or "00000",
+            country=card_request.country or "TR",
+            zip=card_request.zip or "34000",
             email=card_request.email,
             phone=card_request.phone,
             dob=card_request.dob,
@@ -683,7 +672,7 @@ async def check_card(card_request: CardRequest):
             user_agent=card_request.user_agent
         )
         
-        processor = CloverProcessor()
+        processor = PayPalProcessor()
         result = processor.process_card(card)
         
         return {
@@ -702,7 +691,7 @@ async def check_card(card_request: CardRequest):
 @app.post("/api/v1/check/batch", tags=["Card Operations"])
 async def check_cards_batch(batch_request: BatchCardRequest):
     try:
-        processor = CloverProcessor()
+        processor = PayPalProcessor()
         results = []
         
         for card_request in batch_request.cards:
@@ -712,8 +701,8 @@ async def check_cards_batch(batch_request: BatchCardRequest):
                 exp_year=card_request.exp_year,
                 cvc=card_request.cvc,
                 name=card_request.name or "Test User",
-                country=card_request.country or "US",
-                zip=card_request.zip or "00000",
+                country=card_request.country or "TR",
+                zip=card_request.zip or "34000",
                 email=card_request.email,
                 phone=card_request.phone,
                 dob=card_request.dob,
@@ -841,16 +830,15 @@ if __name__ == '__main__':
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
     print('=' * 60)
-    print('🏦 Clover Card Checker API (0$ Pre-Auth)')
+    print('🏦 PayPal Card Checker API (Sadece Auth)')
     print('=' * 60)
     print(f'📍 Sunucu: http://localhost:{port}')
     print(f'📚 Swagger Docs: http://localhost:{port}/docs')
     print(f'📖 ReDoc: http://localhost:{port}/redoc')
     print(f'🔧 Debug: {debug}')
     print(f'🌍 Environment: LIVE')
-    print(f'💳 0$ Pre-Authorization (capture=false)')
-    print(f'🔐 Public Token: {CONFIG["public_token"][:10]}...')
-    print(f'🔐 Private Token: {CONFIG["private_token"][:10]}...')
+    print(f'💳 PayPal 1$ Authorization (capture=false)')
+    print(f'🔐 PayPal Client ID: {CONFIG["paypal_client_id"][:10]}...')
     print('=' * 60)
     
     uvicorn.run(
