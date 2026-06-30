@@ -20,7 +20,6 @@ from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 import uvicorn
 import base64
-import random
 
 # Logging ayarları
 logging.basicConfig(
@@ -65,11 +64,14 @@ class BatchCardRequest(BaseModel):
 class ParseRequest(BaseModel):
     data: Union[str, List, Dict] = Field(...)
 
-# ==================== KONFIGÜRASYON ====================
+# ==================== KONFIGÜRASYON (Kendi PayPal bilgilerinle değiştir!) ====================
 CONFIG = {
+    # ⚠️ Buraya kendi PayPal LIVE Client ID ve Secret'ını yaz!
     'paypal_client_id': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
-    'paypal_client_secret': 'EDdrMKnpxsjdk_MaGcAbTUP_boVPh8jx0w1HNu8c18nbC2j8nL0b1FFYjH0eJSFcPyewmDQv6T0as9n5',
-    'paypal_api_base': 'https://api-m.paypal.com',
+    'paypal_client_secret': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
+    'paypal_api_base': 'https://api-m.paypal.com',  # LIVE için
+    # 'paypal_api_base': 'https://api-m.sandbox.paypal.com',  # Sandbox için
+    
     'mongo_uri': 'mongodb+srv://cardmarketApp:gnbqHdTrlceMZjOS@paymentmanger.gvaavzc.mongodb.net/mydb?retryWrites=true&w=majority',
     'mongo_database': 'mydb',
     'mongo_collection': 'card_checks',
@@ -372,7 +374,7 @@ class CardParser:
         return None
 
 
-# ==================== CLOVER PROCESSOR ====================
+# ==================== YARDIMCI FONKSİYONLAR ====================
 
 def detect_card_brand(card_number: str) -> str:
     patterns = {
@@ -426,9 +428,6 @@ class PayPalProcessor:
             raise
 
     def verify_card(self, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
-        """
-        PayPal Vault Setup Tokens API ile kart doğrulama
-        """
         try:
             if not self.access_token:
                 self._get_access_token()
@@ -439,26 +438,33 @@ class PayPalProcessor:
             country_code = bin_info.get("isoCode2", "US") if bin_info else "US"
             zip_code = "00000"
 
-            # Adres dummy bilgileri
-            first_name = card.name.split()[0] if card.name and " " in card.name else "Test"
-            last_name = card.name.split()[-1] if card.name and " " in card.name else "User"
-            address_line = "123 Main St"
+            # İsim ayrıştırma
+            first_name = "Test"
+            last_name = "User"
+            if card.name:
+                parts = card.name.split()
+                if len(parts) >= 2:
+                    first_name = parts[0]
+                    last_name = " ".join(parts[1:])
+                elif len(parts) == 1:
+                    first_name = parts[0]
+                    last_name = "User"
 
-            # Expiry formatını düzelt: MMYYYY -> YYYY-MM
-            expiry_formatted = f"{card.exp_year}-{card.exp_month}"  # 2026-08
+            # Expiry: YYYY-MM
+            expiry = f"{card.exp_year}-{card.exp_month}"
 
             payload = {
                 "payment_source": {
                     "card": {
-                        "number": card.number,
-                        "expiry": expiry_formatted,
-                        "security_code": card.cvc,
+                        "number": card.number.strip(),
+                        "expiry": expiry,
+                        "security_code": card.cvc.strip(),
                         "name": {
                             "given_name": first_name,
                             "surname": last_name
                         },
                         "billing_address": {
-                            "address_line_1": address_line,
+                            "address_line_1": "123 Main St",
                             "admin_area_2": "Istanbul",
                             "postal_code": zip_code,
                             "country_code": country_code
@@ -475,7 +481,6 @@ class PayPalProcessor:
 
             logger.info(f"🔄 PayPal Setup Token oluşturuluyor...")
             logger.info(f"📇 Kart: {card.get_masked()}")
-            logger.info(f"🌍 Ülke: {country_code}, Zip: {zip_code}")
             logger.info(f"📤 Payload: {json.dumps(payload, indent=2)}")
 
             response = requests.post(setup_url, json=payload, headers=headers)
