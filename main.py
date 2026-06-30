@@ -1,6 +1,6 @@
 """
 PAYPAL CARD CHECKER API - FASTAPI VERSION
-Kart doğrulama için PayPal Vault Setup Tokens API kullanılır.
+Kart doğrulama için PayPal Vault Setup Tokens + Confirm API kullanılır.
 Swagger Docs: /docs
 ReDoc: /redoc
 """
@@ -92,8 +92,8 @@ CONFIG = {
 
 app = FastAPI(
     title="PayPal Card Checker API", 
-    description="PayPal Vault Setup Tokens ile Kart Doğrulama", 
-    version="8.0.0", 
+    description="PayPal Vault Setup Tokens + Confirm ile Kart Doğrulama", 
+    version="9.0.0", 
     docs_url="/docs", 
     redoc_url="/redoc"
 )
@@ -123,6 +123,7 @@ class MongoDB:
             self.collection.create_index('card_last4')
             self.collection.create_index('status')
             self.collection.create_index('setup_token')
+            self.collection.create_index('payment_token')  # 🔥 YENİ
             self.bin_collection.create_index('BIN', unique=True)
             
             logger.info('✅ MongoDB bağlantısı başarılı')
@@ -223,6 +224,7 @@ class CardData:
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def get_masked(self) -> str:
+        # Sadece loglama için kullanılır, response'ta KULLANMA
         return f"{self.number[:4]}****{self.number[-4:]}"
     
     def get_bin(self) -> str:
@@ -498,16 +500,12 @@ def detect_card_brand(card_number: str) -> str:
     return 'UNKNOWN'
 
 def detect_card_type(card_number: str) -> str:
-    """Kart tipini belirle (CREDIT/DEBIT)"""
-    # Bu bilgi genelde BIN'den gelir, yoksa UNKNOWN döner
     return 'UNKNOWN'
 
 def detect_card_category(card_number: str) -> str:
-    """Kart kategorisini belirle (STANDARD/GOLD/PLATINUM vs)"""
-    # Bu bilgi genelde BIN'den gelir, yoksa UNKNOWN döner
     return 'UNKNOWN'
 
-# ==================== PAYPAL PROCESSOR (DÜZELTİLDİ) ====================
+# ==================== PAYPAL PROCESSOR (CONFIRM EKLENDİ) ====================
 
 class PayPalProcessor:
     def __init__(self):
@@ -518,9 +516,7 @@ class PayPalProcessor:
         self.token_expiry = None
 
     def _get_access_token(self) -> str:
-        """PayPal Access Token alır"""
         try:
-            # Token hala geçerli mi kontrol et
             if self.access_token and self.token_expiry:
                 if datetime.now() < self.token_expiry:
                     return self.access_token
@@ -554,61 +550,84 @@ class PayPalProcessor:
             logger.error(f"❌ Token exception: {str(e)}")
             raise
 
-    def verify_card(self, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
+    def _confirm_setup_token(self, setup_token: str) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
         """
-        PayPal Vault Setup Token API ile kart doğrulama
-        DÜZELTİLDİ: name alanı string olarak gönderiliyor
+        Setup Token'ı confirm ederek kalıcı Payment Token oluşturur.
         """
         try:
-            # Access Token al
+            confirm_url = f"{self.api_base}/v3/vault/payment-tokens"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "PayPal-Request-Id": str(uuid.uuid4()),
+                "Prefer": "return=representation"
+            }
+            payload = {
+                "setup_token": {
+                    "id": setup_token
+                }
+            }
+            
+            logger.info(f"🔄 Payment Token confirm ediliyor (setup_token: {setup_token})")
+            response = requests.post(
+                confirm_url,
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+            
+            if response.status_code in [200, 201]:
+                result = response.json()
+                payment_token = result.get("id")
+                status = result.get("status")
+                logger.info(f"✅ Payment Token oluşturuldu: {payment_token} (Status: {status})")
+                return True, payment_token, None, result
+            else:
+                error_text = response.text
+                error_json = None
+                try:
+                    error_json = response.json()
+                    error_text = error_json.get("message", error_text)
+                except:
+                    pass
+                logger.error(f"❌ Payment Token confirm hatası: {error_text}")
+                return False, None, error_text, error_json
+                
+        except Exception as e:
+            logger.error(f"❌ Confirm exception: {str(e)}")
+            return False, None, str(e), None
+
+    def verify_card(self, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[Dict]]:
+        try:
             if not self.access_token:
                 self._get_access_token()
 
             setup_url = f"{self.api_base}/v3/vault/setup-tokens"
 
-            # BIN'den gelen ülke kodunu al
             country_code = bin_info.get("isoCode2", "US") if bin_info else "US"
             zip_code = "00000"
 
-            # ========== NAME ALANI DÜZELTİLDİ ==========
-            # İsim temizleme - TEK BİR STRING OLARAK
             raw_name = card.name.strip() if card.name else "Test User"
-            
-            # Sadece harf, boşluk ve tire bırak (Türkçe karakterleri de koru)
             clean_name = re.sub(r'[^a-zA-ZğüşıöçĞÜŞİÖÇ\s-]', '', raw_name)
-            
-            # Boş ise varsayılan ata
             if not clean_name or clean_name.strip() == "":
                 clean_name = "Test User"
-            
-            # Fazla boşlukları temizle
             clean_name = re.sub(r'\s+', ' ', clean_name).strip()
-            
-            # İsmi kısalt (PayPal 32 karakter sınırı)
             if len(clean_name) > 32:
                 clean_name = clean_name[:32]
-            
             logger.info(f"👤 Temizlenmiş isim: '{clean_name}'")
 
-            # Expiry: YYYY-MM formatında
             expiry = f"{card.exp_year}-{card.exp_month}"
-
-            # Kart numarası ve CVC'yi temizle (sadece rakam)
             number = re.sub(r'[^0-9]', '', card.number)
             cvc = re.sub(r'[^0-9]', '', card.cvc)
 
-            # Kart numarası uzunluğunu kontrol et
-            if len(number) < 15 or len(number) > 16:
-                logger.warning(f"⚠️ Kart numarası uzunluğu: {len(number)} - Standart dışı olabilir")
-
-            # ========== PAYLOAD OLUŞTUR (DÜZELTİLDİ) ==========
             payload = {
                 "payment_source": {
                     "card": {
                         "number": number,
                         "expiry": expiry,
                         "security_code": cvc,
-                        "name": clean_name,  # ✅ TEK BİR STRING OLARAK
+                        "name": clean_name,
                         "billing_address": {
                             "address_line_1": "123 Main St",
                             "admin_area_2": "Istanbul",
@@ -619,12 +638,9 @@ class PayPalProcessor:
                 }
             }
 
-            # Eğer isim boşsa veya geçersizse, name alanını kaldır
             if not clean_name or clean_name == "":
                 del payload["payment_source"]["card"]["name"]
-                logger.info("ℹ️ İsim alanı boş olduğu için kaldırıldı")
 
-            # JSON'u manuel serialize et (ensure_ascii=False Türkçe karakterler için)
             payload_json = json.dumps(payload, ensure_ascii=False)
 
             headers = {
@@ -635,90 +651,56 @@ class PayPalProcessor:
                 "Prefer": "return=representation"
             }
 
-            # Loglama (kart numarasını ve CVC'yi gizle)
+            # Loglama (kart masked)
             safe_payload = payload.copy()
-            if "payment_source" in safe_payload and "card" in safe_payload["payment_source"]:
-                if "number" in safe_payload["payment_source"]["card"]:
-                    safe_payload["payment_source"]["card"]["number"] = "****" + number[-4:]
-                if "security_code" in safe_payload["payment_source"]["card"]:
-                    safe_payload["payment_source"]["card"]["security_code"] = "***"
+            safe_payload["payment_source"]["card"]["number"] = "****" + number[-4:]
+            safe_payload["payment_source"]["card"]["security_code"] = "***"
 
             logger.info(f"🔄 PayPal Setup Token oluşturuluyor...")
             logger.info(f"📇 Kart: {card.get_masked()}")
             logger.info(f"📤 Payload: {json.dumps(safe_payload, ensure_ascii=False, indent=2)}")
 
-            # API isteğini gönder - data parametresi ile
             response = requests.post(
                 setup_url, 
-                data=payload_json,  # ✅ data kullan, json kullanma
+                data=payload_json,
                 headers=headers,
                 timeout=60
             )
 
-            logger.info(f"📊 Response Status: {response.status_code}")
-
-            # Başarılı yanıt
             if response.status_code in [200, 201]:
                 result = response.json()
                 setup_token = result.get("id")
                 status = result.get("status")
-                links = result.get("links", [])
-                
-                # Setup Token URL'ini bul
-                setup_url_token = None
-                for link in links:
-                    if link.get("rel") == "self":
-                        setup_url_token = link.get("href")
-                        break
-                
-                logger.info(f"✅ Setup Token oluşturuldu: {setup_token}")
-                logger.info(f"📌 Status: {status}")
-                if setup_url_token:
-                    logger.info(f"🔗 URL: {setup_url_token}")
-                
-                return True, setup_token, None, result
-            
-            # Hata yanıtı
+                logger.info(f"✅ Setup Token oluşturuldu: {setup_token} (Status: {status})")
+
+                # CONFIRM ADIMI: Payment Token oluştur
+                confirm_success, payment_token, confirm_error, confirm_raw = self._confirm_setup_token(setup_token)
+                if confirm_success:
+                    logger.info(f"✅ Payment Token alındı: {payment_token}")
+                    return True, setup_token, payment_token, None, result
+                else:
+                    logger.warning(f"⚠️ Confirm başarısız: {confirm_error} - Setup token yine de geçerli")
+                    return True, setup_token, None, f"Confirm failed: {confirm_error}", result
+
             else:
                 error_text = response.text
                 error_json = None
                 try:
                     error_json = response.json()
                     error_text = error_json.get("message", error_text)
-                    
-                    # Detaylı hata mesajını logla
-                    if "details" in error_json:
-                        for detail in error_json["details"]:
-                            field = detail.get('field', 'unknown')
-                            issue = detail.get('issue', 'unknown')
-                            description = detail.get('description', '')
-                            logger.error(f"  - {field}: {issue} - {description}")
                 except:
                     pass
-                
-                error_msg = f"HTTP {response.status_code}: {error_text}"
-                logger.error(f"❌ Setup Token hatası: {error_msg}")
-                
-                return False, None, error_msg, error_json if error_json else response.text
+                logger.error(f"❌ Setup Token hatası: {error_text}")
+                return False, None, None, error_text, error_json
 
-        except requests.exceptions.Timeout:
-            logger.error("❌ PayPal API timeout")
-            return False, None, "İstek zaman aşımına uğradı", None
-            
-        except requests.exceptions.ConnectionError:
-            logger.error("❌ PayPal API bağlantı hatası")
-            return False, None, "Bağlantı hatası", None
-            
         except Exception as e:
             logger.error(f"❌ PayPal exception: {str(e)}")
-            return False, None, str(e), None
+            return False, None, None, str(e), None
 
     def process_card(self, card: CardData) -> Dict:
-        """Kart işleme ana metodu"""
         check_id = str(uuid.uuid4())
         
         try:
-            # 1. BIN Check
             bin_info = None
             if mongo_db:
                 bin_info = mongo_db.get_bin_info(card.number)
@@ -737,12 +719,9 @@ class PayPalProcessor:
                     'CountryName': 'TURKEY'
                 }
             
-            # 2. PayPal ile kart doğrulama
-            logger.info('🔄 PayPal kart doğrulama başlatılıyor...')
-            success, setup_token, error, raw_response = self.verify_card(card, bin_info)
+            success, setup_token, payment_token, error, raw_response = self.verify_card(card, bin_info)
             
             if not success:
-                logger.error(f'❌ PayPal doğrulama başarısız: {error}')
                 return {
                     'success': False,
                     'status': 'AUTH_FAILED',
@@ -751,16 +730,18 @@ class PayPalProcessor:
                     'bin_info': bin_info,
                     'check_id': check_id,
                     'setup_token': None,
-                    'raw_response': raw_response
+                    'payment_token': None,
+                    'raw_response': raw_response,
+                    'card_number': card.number,
+                    'card_exp_month': card.exp_month,
+                    'card_exp_year': card.exp_year,
+                    'card_cvc': card.cvc
                 }
             
-            logger.info(f'✅ PayPal doğrulama başarılı! Setup Token: {setup_token}')
-            
-            # 3. MongoDB'ye kaydet
             if mongo_db:
                 record = {
                     'check_id': check_id,
-                    'card_number_masked': card.get_masked(),
+                    'card_number': card.number,  # 🔥 TAM NUMARA
                     'card_last4': card.number[-4:],
                     'card_brand': bin_info.get('Brand'),
                     'card_type': bin_info.get('Type'),
@@ -772,10 +753,11 @@ class PayPalProcessor:
                     'card_country_name': bin_info.get('CountryName'),
                     'bin_prefix': bin_info.get('BIN'),
                     'setup_token': setup_token,
+                    'payment_token': payment_token,  # 🔥 YENİ
                     'amount': 0,
                     'currency': 'USD',
                     'status': 'VERIFIED',
-                    'response_message': 'Kart başarıyla doğrulandı (PayPal Vault)',
+                    'response_message': f'Kart doğrulandı (Payment Token: {payment_token})' if payment_token else 'Kart doğrulandı (Setup Token)',
                     'is_zero_dollar': True,
                     'is_preauth': True,
                     'raw_response': json.dumps(raw_response) if raw_response else None,
@@ -784,14 +766,19 @@ class PayPalProcessor:
                 }
                 mongo_db.insert_record(record)
             
+            # 🔥 RESPONSE'TA MASKELEME YOK
             return {
                 'success': True,
                 'status': 'VERIFIED',
-                'message': 'Kart başarıyla doğrulandı (PayPal Vault)',
+                'message': f'Kart doğrulandı (Payment Token: {payment_token})' if payment_token else 'Kart doğrulandı (Setup Token)',
                 'setup_token': setup_token,
+                'payment_token': payment_token,
                 'bin_info': bin_info,
                 'check_id': check_id,
-                'card_masked': card.get_masked(),
+                'card_number': card.number,
+                'card_exp_month': card.exp_month,
+                'card_exp_year': card.exp_year,
+                'card_cvc': card.cvc,
                 'card_brand': bin_info.get('Brand'),
                 'card_last4': card.number[-4:],
                 'amount': 0,
@@ -805,7 +792,13 @@ class PayPalProcessor:
                 'status': 'ERROR',
                 'message': 'İşlem hatası',
                 'error': str(e),
-                'check_id': check_id
+                'check_id': check_id,
+                'setup_token': None,
+                'payment_token': None,
+                'card_number': card.number,
+                'card_exp_month': card.exp_month,
+                'card_exp_year': card.exp_year,
+                'card_cvc': card.cvc
             }
 
 # ==================== API ENDPOINT'LER ====================
@@ -813,11 +806,11 @@ class PayPalProcessor:
 @app.get("/", tags=["Root"])
 async def root():
     return {
-        "message": "PayPal Card Checker API (Vault Setup Tokens)", 
+        "message": "PayPal Card Checker API (Vault Setup + Confirm)", 
         "docs": "/docs", 
         "redoc": "/redoc", 
         "health": "/health", 
-        "version": "8.0.0"
+        "version": "9.0.0"
     }
 
 @app.get("/health", tags=["Health"])
@@ -827,7 +820,7 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "service": "PayPal Card Check API",
-        "version": "8.0.0",
+        "version": "9.0.0",
         "environment": "LIVE",
         "mongodb": mongo_status,
         "paypal": {
@@ -835,7 +828,7 @@ async def health_check():
             "client_id": CONFIG['paypal_client_id'][:10] + "..."
         },
         "endpoints": [
-            "POST /api/v1/check - PayPal kart doğrulama (Vault)",
+            "POST /api/v1/check - PayPal kart doğrulama (Setup + Confirm)",
             "POST /api/v1/check/batch - Toplu doğrulama",
             "POST /api/v1/parse - Sadece parse test",
             "GET /api/v1/bin/{card} - BIN kontrolü",
@@ -919,7 +912,7 @@ async def parse_only(parse_request: ParseRequest):
             "count": len(cards),
             "cards": [
                 {
-                    "number_masked": card.get_masked(),
+                    "number": card.number,
                     "exp_month": card.exp_month,
                     "exp_year": card.exp_year,
                     "cvc": card.cvc,
@@ -996,14 +989,14 @@ if __name__ == '__main__':
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
     print('=' * 70)
-    print('🏦 PayPal Card Checker API (Vault Setup Tokens)')
+    print('🏦 PayPal Card Checker API (Vault Setup + Confirm)')
     print('=' * 70)
     print(f'📍 Sunucu: http://localhost:{port}')
     print(f'📚 Swagger Docs: http://localhost:{port}/docs')
     print(f'📖 ReDoc: http://localhost:{port}/redoc')
     print(f'🔧 Debug: {debug}')
     print(f'🌍 Environment: LIVE')
-    print(f'💳 PayPal Vault Setup Tokens (0$ doğrulama)')
+    print(f'💳 PayPal Vault Setup + Confirm (0$ doğrulama + kalıcı token)')
     print(f'🔐 PayPal Client ID: {CONFIG["paypal_client_id"][:10]}...')
     print(f'📦 MongoDB: {CONFIG["mongo_database"]}/{CONFIG["mongo_collection"]}')
     print('=' * 70)
