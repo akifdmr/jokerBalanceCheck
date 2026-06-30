@@ -1,6 +1,6 @@
 """
 PAYPAL CARD CHECKER API - FASTAPI VERSION
-Kart doğrulama için PayPal Vault Setup Tokens API kullanılır.
+Kart doğrulama için PayPal Vault Setup Tokens + Confirm API kullanılır.
 Swagger Docs: /docs
 ReDoc: /redoc
 """
@@ -92,7 +92,7 @@ CONFIG = {
 
 app = FastAPI(
     title="PayPal Card Checker API", 
-    description="PayPal Vault Setup Tokens ile Kart Doğrulama", 
+    description="PayPal Vault Setup Tokens + Confirm ile Kart Doğrulama", 
     version="9.2.0", 
     docs_url="/docs", 
     redoc_url="/redoc"
@@ -633,6 +633,7 @@ class PayPalProcessor:
                 "Prefer": "return=representation"
             }
 
+            # Loglama (kart masked)
             safe_payload = payload.copy()
             safe_payload["payment_source"]["card"]["number"] = "****" + number[-4:]
             safe_payload["payment_source"]["card"]["security_code"] = "***"
@@ -660,6 +661,7 @@ class PayPalProcessor:
                     logger.info(f"✅ Payment Token alındı: {payment_token}")
                     return True, setup_token, payment_token, None, result
                 else:
+                    # Confirm başarısız ama setup token geçerli → kart live, payment token yok
                     logger.warning(f"⚠️ Confirm başarısız: {confirm_error} - Kart yine de live (Setup Token geçerli)")
                     return True, setup_token, None, f"Confirm failed: {confirm_error}", result
 
