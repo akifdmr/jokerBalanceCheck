@@ -1,6 +1,8 @@
 """
-CLOVER CARD CHECKER API - 0$ CHARGE VERSION
-Tüm konfigürasyon koda gömülüdür. .env dosyası gerekmez.
+CLOVER CARD CHECKER API - FASTAPI VERSION
+0$ CHARGE ile kart doğrulama
+Swagger Docs: /docs
+ReDoc: /redoc
 """
 import os
 import re
@@ -11,10 +13,12 @@ import requests
 from typing import Dict, List, Optional, Union, Any, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
+import uvicorn
 
 # Logging ayarları
 logging.basicConfig(
@@ -23,32 +27,182 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
-CORS(app)
+# ==================== PYDANTIC MODELS ====================
 
-# ==================== KONFIGÜRASYON (KOD İÇİNE GÖMÜLÜ) ====================
+class CardRequest(BaseModel):
+    """Kart kontrolü için gelen veri modeli"""
+    number: str = Field(..., description="Kart numarası (16 hane)", example="6011361000006668")
+    exp_month: str = Field(..., description="Son kullanma ayı (2 hane)", example="12")
+    exp_year: str = Field(..., description="Son kullanma yılı (2 veya 4 hane)", example="30")
+    cvc: str = Field(..., description="Kart güvenlik kodu (3-4 hane)", example="123")
+    name: Optional[str] = Field("Test User", description="Kart sahibi adı")
+    country: Optional[str] = Field("US", description="Ülke kodu")
+    zip: Optional[str] = Field("00000", description="Posta kodu")
+    email: Optional[str] = Field(None, description="Email adresi")
+    phone: Optional[str] = Field(None, description="Telefon numarası")
+    dob: Optional[str] = Field(None, description="Doğum tarihi")
+    ip: Optional[str] = Field(None, description="IP adresi")
+    user_agent: Optional[str] = Field(None, description="User Agent")
+
+class BatchCardRequest(BaseModel):
+    """Batch kart kontrolü için gelen veri modeli"""
+    cards: List[CardRequest] = Field(..., description="Kart listesi", min_items=1, max_items=50)
+
+class ParseRequest(BaseModel):
+    """Parse testi için gelen veri modeli"""
+    data: Union[str, List, Dict] = Field(..., description="Parse edilecek veri")
+
+class ProcessingResponse(BaseModel):
+    """İşlem sonucu modeli"""
+    success: bool
+    status: str
+    message: str
+    error: Optional[str] = None
+    data: Optional[Dict] = None
+
+class HealthResponse(BaseModel):
+    """Sağlık kontrolü yanıtı"""
+    status: str
+    timestamp: str
+    service: str
+    version: str
+    environment: str
+    mongodb: str
+    endpoints: List[str]
+
+# ==================== KONFIGÜRASYON ====================
 CONFIG = {
-    # Clover LIVE Bilgileri
     'merchant_id': '518993421163932',
     'public_token': '0c61457d01450a5e05bbc10068483a70',
     'private_token': 'c7ee250b-e9ae-ab59-ba52-616ecc63ed29',
-    
-    # Clover API Endpoints
     'api_base': 'https://api.clover.com',
     'token_api': 'https://token.clover.com',
-    
-    # Charge Endpoint
     'charge_endpoint': 'https://www.clover.com/scl/v1/merchant/YHQFFZ1ZDDT61/charge',
     'company_id': 'YHQFFZ1ZDDT61',
-    
-    # MongoDB
     'mongo_uri': 'mongodb+srv://cardmarketApp:gnbqHdTrlceMZjOS@paymentmanger.gvaavzc.mongodb.net/mydb?retryWrites=true&w=majority',
     'mongo_database': 'mydb',
     'mongo_collection': 'card_checks',
     'mongo_bin_collection': 'binList'
 }
 
-# ==================== DATA CLASSES ====================
+app = FastAPI(
+    title="Clover Card Checker API",
+    description="""
+    ## Clover 0$ Charge ile Kart Doğrulama API'si
+    
+    Bu API, Clover üzerinden 0$ charge işlemi ile kartları doğrular.
+    
+    ### Özellikler:
+    - **Parser**: JSON, Pipe, CSV, Full Pipe formatlarını otomatik tanır
+    - **BIN Check**: MongoDB'den BIN bilgilerini sorgular
+    - **0$ Charge**: Clover üzerinden 0$ capture=true işlemi yapar
+    - **MongoDB**: Tüm işlemleri kaydeder
+    - **Batch**: Toplu kart kontrolü
+    
+    ### Desteklenen Formatlar:
+    - JSON: `{"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}`
+    - Pipe: `"number|month|year|cvc"`
+    - Full Pipe: `"number|month|year|cvc|name|...|email|phone|dob|ip|user_agent"`
+    - CSV: `"CardNumber,Expiry,CVV"`
+    - CreditCard: `{"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}`
+    """,
+    version="7.0.0",
+    contact={
+        "name": "CardMarket",
+        "email": "support@cardmarket.com"
+    },
+    license_info={
+        "name": "Private",
+    },
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# ==================== MONGODB ====================
+
+class MongoDB:
+    _instance = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(MongoDB, cls).__new__(cls)
+            cls._instance._initialize()
+        return cls._instance
+    
+    def _initialize(self):
+        try:
+            self.client = MongoClient(CONFIG['mongo_uri'])
+            self.client.admin.command('ping')
+            self.db = self.client[CONFIG['mongo_database']]
+            self.collection = self.db[CONFIG['mongo_collection']]
+            self.bin_collection = self.db[CONFIG['mongo_bin_collection']]
+            
+            self.collection.create_index('check_id', unique=True)
+            self.collection.create_index('created_at')
+            self.collection.create_index('card_last4')
+            self.collection.create_index('status')
+            self.bin_collection.create_index('BIN', unique=True)
+            
+            logger.info('✅ MongoDB bağlantısı başarılı')
+            
+        except ConnectionFailure as e:
+            logger.error(f'❌ MongoDB bağlantı hatası: {str(e)}')
+            raise
+        except Exception as e:
+            logger.error(f'❌ MongoDB başlatma hatası: {str(e)}')
+            raise
+    
+    def get_bin_info(self, card_number: str) -> Optional[Dict]:
+        try:
+            bin_prefixes = [card_number[:6], card_number[:5], card_number[:4]]
+            
+            for bin_prefix in bin_prefixes:
+                result = self.bin_collection.find_one({'BIN': bin_prefix})
+                if result:
+                    if '_id' in result:
+                        result['_id'] = str(result['_id'])
+                    return result
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f'❌ BIN sorgulama hatası: {str(e)}')
+            return None
+    
+    def insert_record(self, data: Dict) -> str:
+        try:
+            if 'created_at' not in data:
+                data['created_at'] = datetime.now().isoformat()
+            if 'updated_at' not in data:
+                data['updated_at'] = datetime.now().isoformat()
+            
+            result = self.collection.insert_one(data)
+            logger.info(f'✅ Kayıt eklendi: {data.get("check_id")}')
+            return str(result.inserted_id)
+            
+        except Exception as e:
+            logger.error(f'❌ Kayıt ekleme hatası: {str(e)}')
+            raise
+    
+    def get_record(self, check_id: str) -> Optional[Dict]:
+        try:
+            result = self.collection.find_one({'check_id': check_id})
+            if result and '_id' in result:
+                result['_id'] = str(result['_id'])
+            return result
+        except Exception as e:
+            logger.error(f'❌ Kayıt getirme hatası: {str(e)}')
+            raise
+
+
+try:
+    mongo_db = MongoDB()
+except Exception as e:
+    logger.error(f'❌ MongoDB başlatılamadı: {str(e)}')
+    mongo_db = None
+
+
+# ==================== PARSER ====================
 
 @dataclass
 class CardData:
@@ -68,45 +222,7 @@ class CardData:
     
     def get_masked(self) -> str:
         return f"{self.number[:4]}****{self.number[-4:]}"
-    
-    def get_bin(self) -> str:
-        return self.number[:6]
 
-
-@dataclass
-class ProcessingResult:
-    card: CardData
-    success: bool
-    status: str
-    message: str
-    error: Optional[str] = None
-    token: Optional[str] = None
-    charge_id: Optional[str] = None
-    bin_info: Optional[Dict] = None
-    check_id: Optional[str] = None
-    amount: float = 0
-    currency: str = "USD"
-    raw_response: Optional[Dict] = None
-    
-    def to_dict(self) -> Dict:
-        return {
-            'success': self.success,
-            'status': self.status,
-            'message': self.message,
-            'error': self.error,
-            'token': self.token,
-            'charge_id': self.charge_id,
-            'bin_info': self.bin_info,
-            'check_id': self.check_id,
-            'amount': self.amount,
-            'currency': self.currency,
-            'card_masked': self.card.get_masked() if self.card else None,
-            'card_brand': self.bin_info.get('Brand') if self.bin_info else None,
-            'card_last4': self.card.number[-4:] if self.card else None
-        }
-
-
-# ==================== PARSER ====================
 
 class CardParser:
     @staticmethod
@@ -331,91 +447,22 @@ class CardParser:
         return None
 
 
-# ==================== MONGODB ====================
-
-class MongoDB:
-    _instance = None
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(MongoDB, cls).__new__(cls)
-            cls._instance._initialize()
-        return cls._instance
-    
-    def _initialize(self):
-        try:
-            self.client = MongoClient(CONFIG['mongo_uri'])
-            self.client.admin.command('ping')
-            self.db = self.client[CONFIG['mongo_database']]
-            self.collection = self.db[CONFIG['mongo_collection']]
-            self.bin_collection = self.db[CONFIG['mongo_bin_collection']]
-            
-            self.collection.create_index('check_id', unique=True)
-            self.collection.create_index('created_at')
-            self.collection.create_index('card_last4')
-            self.collection.create_index('status')
-            self.bin_collection.create_index('BIN', unique=True)
-            
-            logger.info('✅ MongoDB bağlantısı başarılı')
-            
-        except ConnectionFailure as e:
-            logger.error(f'❌ MongoDB bağlantı hatası: {str(e)}')
-            raise
-        except Exception as e:
-            logger.error(f'❌ MongoDB başlatma hatası: {str(e)}')
-            raise
-    
-    def get_bin_info(self, card_number: str) -> Optional[Dict]:
-        try:
-            bin_prefixes = [card_number[:6], card_number[:5], card_number[:4]]
-            
-            for bin_prefix in bin_prefixes:
-                result = self.bin_collection.find_one({'BIN': bin_prefix})
-                if result:
-                    if '_id' in result:
-                        result['_id'] = str(result['_id'])
-                    return result
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f'❌ BIN sorgulama hatası: {str(e)}')
-            return None
-    
-    def insert_record(self, data: Dict) -> str:
-        try:
-            if 'created_at' not in data:
-                data['created_at'] = datetime.now().isoformat()
-            if 'updated_at' not in data:
-                data['updated_at'] = datetime.now().isoformat()
-            
-            result = self.collection.insert_one(data)
-            logger.info(f'✅ Kayıt eklendi: {data.get("check_id")}')
-            return str(result.inserted_id)
-            
-        except Exception as e:
-            logger.error(f'❌ Kayıt ekleme hatası: {str(e)}')
-            raise
-    
-    def get_record(self, check_id: str) -> Optional[Dict]:
-        try:
-            result = self.collection.find_one({'check_id': check_id})
-            if result and '_id' in result:
-                result['_id'] = str(result['_id'])
-            return result
-        except Exception as e:
-            logger.error(f'❌ Kayıt getirme hatası: {str(e)}')
-            raise
-
-
-try:
-    mongo_db = MongoDB()
-except Exception as e:
-    logger.error(f'❌ MongoDB başlatılamadı: {str(e)}')
-    mongo_db = None
-
-
 # ==================== CLOVER PROCESSOR ====================
+
+def detect_card_brand(card_number: str) -> str:
+    patterns = {
+        'VISA': r'^4',
+        'MASTERCARD': r'^(5[1-5]|2[2-7])',
+        'AMEX': r'^(34|37)',
+        'DISCOVER': r'^(6011|65|64[4-9]|622)',
+        'JCB': r'^35'
+    }
+    
+    for brand, pattern in patterns.items():
+        if re.match(pattern, card_number):
+            return brand
+    return 'UNKNOWN'
+
 
 class CloverProcessor:
     def __init__(self):
@@ -513,7 +560,7 @@ class CloverProcessor:
             logger.error(f'❌ Charge exception: {str(e)}')
             return False, None, str(e), None
     
-    def process_card(self, card: CardData) -> ProcessingResult:
+    def process_card(self, card: CardData) -> Dict:
         check_id = str(uuid.uuid4())
         
         try:
@@ -542,15 +589,15 @@ class CloverProcessor:
             
             if not success:
                 logger.error(f'❌ Token oluşturulamadı: {error}')
-                return ProcessingResult(
-                    card=card,
-                    success=False,
-                    status='TOKEN_FAILED',
-                    message='Token oluşturulamadı',
-                    error=error,
-                    bin_info=bin_info,
-                    check_id=check_id
-                )
+                return {
+                    'success': False,
+                    'status': 'TOKEN_FAILED',
+                    'message': 'Token oluşturulamadı',
+                    'error': error,
+                    'bin_info': bin_info,
+                    'check_id': check_id,
+                    'token': None
+                }
             
             logger.info(f'✅ Token oluşturuldu: {token}')
             
@@ -560,17 +607,17 @@ class CloverProcessor:
             
             if not success:
                 logger.error(f'❌ 0$ Charge başarısız: {error}')
-                return ProcessingResult(
-                    card=card,
-                    success=False,
-                    status='CHARGE_FAILED',
-                    message='0$ Charge başarısız',
-                    error=error,
-                    token=token,
-                    bin_info=bin_info,
-                    check_id=check_id,
-                    raw_response=raw_response
-                )
+                return {
+                    'success': False,
+                    'status': 'CHARGE_FAILED',
+                    'message': '0$ Charge başarısız',
+                    'error': error,
+                    'token': token,
+                    'bin_info': bin_info,
+                    'check_id': check_id,
+                    'charge_id': None,
+                    'raw_response': raw_response
+                }
             
             logger.info(f'✅ 0$ Charge başarılı! Charge ID: {charge_id}')
             
@@ -600,370 +647,307 @@ class CloverProcessor:
                 }
                 mongo_db.insert_record(record)
             
-            return ProcessingResult(
-                card=card,
-                success=True,
-                status='CAPTURED',
-                message='Kart başarıyla doğrulandı (0$ charge)',
-                token=token,
-                charge_id=charge_id,
-                bin_info=bin_info,
-                check_id=check_id,
-                amount=0,
-                currency='USD',
-                raw_response=raw_response
-            )
+            return {
+                'success': True,
+                'status': 'CAPTURED',
+                'message': 'Kart başarıyla doğrulandı (0$ charge)',
+                'token': token,
+                'charge_id': charge_id,
+                'bin_info': bin_info,
+                'check_id': check_id,
+                'amount': 0,
+                'currency': 'USD',
+                'card_masked': card.get_masked(),
+                'card_brand': bin_info.get('Brand'),
+                'card_last4': card.number[-4:]
+            }
             
         except Exception as e:
             logger.error(f'❌ İşlem hatası: {str(e)}')
-            return ProcessingResult(
-                card=card,
-                success=False,
-                status='ERROR',
-                message='İşlem hatası',
-                error=str(e),
-                check_id=check_id
-            )
-
-
-# ==================== YARDIMCI FONKSİYONLAR ====================
-
-def detect_card_brand(card_number: str) -> str:
-    patterns = {
-        'VISA': r'^4',
-        'MASTERCARD': r'^(5[1-5]|2[2-7])',
-        'AMEX': r'^(34|37)',
-        'DISCOVER': r'^(6011|65|64[4-9]|622)',
-        'JCB': r'^35'
-    }
-    
-    for brand, pattern in patterns.items():
-        if re.match(pattern, card_number):
-            return brand
-    return 'UNKNOWN'
-
-
-def parse_card_data(data: Union[str, List, Dict]) -> List[CardData]:
-    return CardParser.parse(data)
+            return {
+                'success': False,
+                'status': 'ERROR',
+                'message': 'İşlem hatası',
+                'error': str(e),
+                'check_id': check_id
+            }
 
 
 # ==================== API ENDPOINT'LER ====================
 
-@app.route('/api/v1/check', methods=['POST'])
-@app.route('/api/v1/single', methods=['POST'])
-def check_card():
+@app.get("/", tags=["Root"])
+async def root():
+    """Ana sayfa - API bilgileri"""
+    return {
+        "message": "Clover Card Checker API",
+        "docs": "/docs",
+        "redoc": "/redoc",
+        "health": "/health",
+        "version": "7.0.0"
+    }
+
+
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
+async def health_check():
+    """API sağlık kontrolü"""
+    mongo_status = 'connected' if mongo_db else 'disconnected'
+    
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "Clover Card Check API (0$ Charge)",
+        "version": "7.0.0",
+        "environment": "LIVE",
+        "mongodb": mongo_status,
+        "endpoints": [
+            "POST /api/v1/check - Kart kontrolü (0$ charge)",
+            "POST /api/v1/check/batch - Toplu kart kontrolü",
+            "POST /api/v1/parse - Sadece parse test",
+            "GET /api/v1/bin/{card} - BIN kontrolü",
+            "GET /api/v1/check/{id} - Kayıt sorgula",
+            "GET /api/v1/stats - İstatistikler",
+            "GET /health - Sağlık kontrolü"
+        ]
+    }
+
+
+@app.post("/api/v1/check", response_model=ProcessingResponse, tags=["Card Operations"])
+async def check_card(card_request: CardRequest):
+    """
+    Tek bir kartı 0$ charge ile doğrular.
+    
+    - **number**: Kart numarası (16 hane)
+    - **exp_month**: Son kullanma ayı (2 hane)
+    - **exp_year**: Son kullanma yılı (2 veya 4 hane)
+    - **cvc**: Kart güvenlik kodu (3-4 hane)
+    - **name**: Kart sahibi adı (opsiyonel)
+    - **email**: Email adresi (opsiyonel)
+    - **phone**: Telefon numarası (opsiyonel)
+    """
     try:
-        data = request.get_json()
+        card = CardData(
+            number=card_request.number,
+            exp_month=card_request.exp_month,
+            exp_year=card_request.exp_year,
+            cvc=card_request.cvc,
+            name=card_request.name or "Test User",
+            country=card_request.country or "US",
+            zip=card_request.zip or "00000",
+            email=card_request.email,
+            phone=card_request.phone,
+            dob=card_request.dob,
+            ip=card_request.ip,
+            user_agent=card_request.user_agent
+        )
         
-        if not data:
-            return jsonify({
-                'success': False,
-                'status': 'ERROR',
-                'error': 'Veri gönderilmedi'
-            }), 400
-        
-        cards = parse_card_data(data)
-        
-        if not cards:
-            return jsonify({
-                'success': False,
-                'status': 'ERROR',
-                'error': 'Kart verisi parse edilemedi',
-                'supported_formats': [
-                    'JSON: {"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}',
-                    'Pipe: "number|month|year|cvc"',
-                    'JSON Array: [{"number": "...", ...}]',
-                    'CreditCard: {"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}'
-                ]
-            }), 400
-        
-        card = cards[0]
         processor = CloverProcessor()
         result = processor.process_card(card)
         
-        return jsonify({
-            'success': result.success,
-            'status': result.status,
-            'message': result.message,
-            'error': result.error,
-            'data': result.to_dict()
-        })
+        return {
+            "success": result.get('success', False),
+            "status": result.get('status', 'UNKNOWN'),
+            "message": result.get('message', ''),
+            "error": result.get('error'),
+            "data": result
+        }
         
     except Exception as e:
         logger.error(f'❌ API hatası: {str(e)}')
-        return jsonify({
-            'success': False,
-            'status': 'ERROR',
-            'error': str(e)
-        }), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.route('/api/v1/check/batch', methods=['POST'])
-def check_cards_batch():
+@app.post("/api/v1/check/batch", response_model=Dict, tags=["Card Operations"])
+async def check_cards_batch(batch_request: BatchCardRequest):
+    """
+    Birden fazla kartı batch olarak doğrular.
+    
+    - **cards**: Kart listesi (en fazla 50 kart)
+    """
     try:
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({
-                'success': False,
-                'status': 'ERROR',
-                'error': 'Veri gönderilmedi'
-            }), 400
-        
-        cards = parse_card_data(data)
-        
-        if not cards:
-            return jsonify({
-                'success': False,
-                'status': 'ERROR',
-                'error': 'Kart verisi parse edilemedi'
-            }), 400
-        
         processor = CloverProcessor()
         results = []
         
-        for card in cards:
+        for card_request in batch_request.cards:
+            card = CardData(
+                number=card_request.number,
+                exp_month=card_request.exp_month,
+                exp_year=card_request.exp_year,
+                cvc=card_request.cvc,
+                name=card_request.name or "Test User",
+                country=card_request.country or "US",
+                zip=card_request.zip or "00000",
+                email=card_request.email,
+                phone=card_request.phone,
+                dob=card_request.dob,
+                ip=card_request.ip,
+                user_agent=card_request.user_agent
+            )
+            
             result = processor.process_card(card)
-            results.append(result.to_dict())
+            results.append(result)
         
-        return jsonify({
-            'success': True,
-            'total': len(results),
-            'results': results
-        })
+        return {
+            "success": True,
+            "total": len(results),
+            "results": results
+        }
         
     except Exception as e:
         logger.error(f'❌ Batch API hatası: {str(e)}')
-        return jsonify({
-            'success': False,
-            'status': 'ERROR',
-            'error': str(e)
-        }), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.route('/api/v1/parse', methods=['POST'])
-def parse_only():
+@app.post("/api/v1/parse", tags=["Parser"])
+async def parse_only(parse_request: ParseRequest):
+    """
+    Sadece parser testi yapar.
+    
+    Herhangi bir formattaki veriyi parse eder ve sonucu döndürür.
+    """
     try:
-        data = request.get_json()
+        cards = CardParser.parse(parse_request.data)
         
-        if not data:
-            return jsonify({
-                'success': False,
-                'error': 'Veri gönderilmedi'
-            }), 400
-        
-        cards = parse_card_data(data)
-        
-        return jsonify({
-            'success': True,
-            'count': len(cards),
-            'cards': [
+        return {
+            "success": True,
+            "count": len(cards),
+            "cards": [
                 {
-                    'number_masked': card.get_masked(),
-                    'exp_month': card.exp_month,
-                    'exp_year': card.exp_year,
-                    'cvc': card.cvc,
-                    'name': card.name,
-                    'email': card.email,
-                    'phone': card.phone,
-                    'country': card.country,
-                    'zip': card.zip
+                    "number_masked": card.get_masked(),
+                    "exp_month": card.exp_month,
+                    "exp_year": card.exp_year,
+                    "cvc": card.cvc,
+                    "name": card.name,
+                    "email": card.email,
+                    "phone": card.phone,
+                    "country": card.country,
+                    "zip": card.zip
                 }
                 for card in cards
             ]
-        })
+        }
         
     except Exception as e:
         logger.error(f'❌ Parse hatası: {str(e)}')
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.route('/api/v1/bin/<card_number>', methods=['GET'])
-def bin_check(card_number: str):
+@app.get("/api/v1/bin/{card_number}", tags=["BIN"])
+async def bin_check(card_number: str):
+    """
+    Kart numarasından BIN bilgilerini sorgular.
+    
+    - **card_number**: Kart numarası (ilk 6 hanesi BIN olarak kullanılır)
+    """
     try:
         if not mongo_db:
-            return jsonify({
-                'success': False,
-                'error': 'MongoDB bağlantısı yok'
-            }), 500
+            raise HTTPException(status_code=500, detail="MongoDB bağlantısı yok")
         
         bin_info = mongo_db.get_bin_info(card_number.replace(' ', ''))
         
         if not bin_info:
-            return jsonify({
-                'success': False,
-                'error': 'BIN bulunamadı',
-                'bin_prefix': card_number[:6]
-            }), 404
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "BIN bulunamadı",
+                    "bin_prefix": card_number[:6]
+                }
+            )
         
-        return jsonify({
-            'success': True,
-            'bin_info': bin_info
-        })
+        return {
+            "success": True,
+            "bin_info": bin_info
+        }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f'❌ BIN API hatası: {str(e)}')
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.route('/api/v1/check/<check_id>', methods=['GET'])
-def get_check_record(check_id: str):
+@app.get("/api/v1/check/{check_id}", tags=["Records"])
+async def get_check_record(check_id: str):
+    """
+    Kayıtlı bir kontrolü sorgular.
+    
+    - **check_id**: Kontrol ID'si (UUID formatında)
+    """
     try:
         if not mongo_db:
-            return jsonify({
-                'success': False,
-                'error': 'MongoDB bağlantısı yok'
-            }), 500
+            raise HTTPException(status_code=500, detail="MongoDB bağlantısı yok")
         
         record = mongo_db.get_record(check_id)
         
         if not record:
-            return jsonify({
-                'success': False,
-                'error': 'Kayıt bulunamadı'
-            }), 404
+            raise HTTPException(status_code=404, detail="Kayıt bulunamadı")
         
-        return jsonify({
-            'success': True,
-            'record': record
-        })
+        return {
+            "success": True,
+            "record": record
+        }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f'❌ Sorgulama hatası: {str(e)}')
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.route('/api/v1/stats', methods=['GET'])
-def get_stats():
+@app.get("/api/v1/stats", tags=["Stats"])
+async def get_stats():
+    """İstatistikleri getirir."""
     try:
         if not mongo_db:
-            return jsonify({
-                'success': False,
-                'error': 'MongoDB bağlantısı yok'
-            }), 500
+            raise HTTPException(status_code=500, detail="MongoDB bağlantısı yok")
         
         stats = mongo_db.get_stats()
         
-        return jsonify({
-            'success': True,
-            'stats': stats
-        })
+        return {
+            "success": True,
+            "stats": stats
+        }
         
     except Exception as e:
         logger.error(f'❌ İstatistik hatası: {str(e)}')
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    mongo_status = 'connected' if mongo_db else 'disconnected'
-    
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.now().isoformat(),
-        'service': 'Clover Card Check API (0$ Charge)',
-        'version': '7.0.0',
-        'environment': 'LIVE',
-        'mongodb': mongo_status,
-        'clover': {
-            'merchant_id': CONFIG['merchant_id'][:4] + '***' if CONFIG['merchant_id'] else None,
-            'charge_endpoint': CONFIG['charge_endpoint']
-        },
-        'endpoints': [
-            'POST /api/v1/check - Kart kontrolü (0$ charge)',
-            'POST /api/v1/check/batch - Toplu kart kontrolü',
-            'POST /api/v1/parse - Sadece parse test',
-            'GET /api/v1/bin/<card> - BIN kontrolü',
-            'GET /api/v1/check/<id> - Kayıt sorgula',
-            'GET /api/v1/stats - İstatistikler',
-            'GET /health - Sağlık kontrolü'
-        ]
-    })
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ==================== HATA YÖNETİMİ ====================
 
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({
-        'success': False,
-        'status': 'ERROR',
-        'error': 'Endpoint bulunamadı',
-        'code': 'NOT_FOUND'
-    }), 404
-
-@app.errorhandler(405)
-def method_not_allowed(error):
-    return jsonify({
-        'success': False,
-        'status': 'ERROR',
-        'error': 'Bu method desteklenmiyor',
-        'code': 'METHOD_NOT_ALLOWED'
-    }), 405
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({
-        'success': False,
-        'status': 'ERROR',
-        'error': 'Sunucu hatası',
-        'code': 'INTERNAL_ERROR'
-    }), 500
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "success": False,
+            "status": "ERROR",
+            "error": exc.detail,
+            "code": "HTTP_ERROR"
+        }
+    )
 
 
 # ==================== SUNUCUYU BAŞLAT ====================
-
-# Render/Heroku/Cloud için uygulama nesnesi
-application = app
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 3000))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
     print('=' * 60)
-    print('🏦 Clover Card Checker API (0$ Charge)')
+    print('🏦 Clover Card Checker API (FastAPI)')
     print('=' * 60)
     print(f'📍 Sunucu: http://localhost:{port}')
+    print(f'📚 Swagger Docs: http://localhost:{port}/docs')
+    print(f'📖 ReDoc: http://localhost:{port}/redoc')
     print(f'🔧 Debug: {debug}')
     print(f'🌍 Environment: LIVE')
     print(f'💰 Charge Miktarı: 0$ (Doğrulama)')
-    
-    print('\n📋 API Endpoint\'leri:')
-    print('  POST /api/v1/check        - Kart kontrolü (0$ charge)')
-    print('  POST /api/v1/check/batch  - Toplu kart kontrolü')
-    print('  POST /api/v1/parse        - Sadece parse test')
-    print('  GET  /api/v1/bin/<card>   - BIN kontrolü')
-    print('  GET  /api/v1/check/<id>   - Kayıt sorgula')
-    print('  GET  /api/v1/stats        - İstatistikler')
-    print('  GET  /health              - Sağlık kontrolü')
-    
-    print('\n📝 Desteklenen Formatlar:')
-    print('  ✅ JSON: {"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}')
-    print('  ✅ Pipe: "number|month|year|cvc"')
-    print('  ✅ JSON Array: [{"number": "...", ...}]')
-    print('  ✅ CreditCard: {"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}')
-    print('  ✅ CardInfo: {"CardInfo": {"CardNumber": "...", "Expiration": "...", "CVV": "..."}}')
-    print('  ✅ CSV: "CardNumber,Expiry,CVV"')
-    print('  ✅ Full Pipe: "number|month|year|cvc|name|...|email|phone|dob|ip|user_agent"')
-    
-    print('\n💳 0$ Charge Akışı:')
-    print('  1. Kart verisi parse edilir (otomatik format tespiti)')
-    print('  2. BIN check yapılır (MongoDB)')
-    print('  3. Token oluşturulur (Clover)')
-    print('  4. 0$ Capture=true charge yapılır')
-    print('  5. Sonuç MongoDB\'ye kaydedilir')
     print('=' * 60)
     
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=debug,
+        log_level="info"
+    )
