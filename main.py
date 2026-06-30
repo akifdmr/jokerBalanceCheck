@@ -13,9 +13,9 @@ import requests
 from typing import Dict, List, Optional, Union, Any, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
-from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 import uvicorn
@@ -31,10 +31,10 @@ logger = logging.getLogger(__name__)
 
 class CardRequest(BaseModel):
     """Kart kontrolü için gelen veri modeli"""
-    number: str = Field(..., description="Kart numarası (16 hane)", example="6011361000006668")
-    exp_month: str = Field(..., description="Son kullanma ayı (2 hane)", example="12")
-    exp_year: str = Field(..., description="Son kullanma yılı (2 veya 4 hane)", example="30")
-    cvc: str = Field(..., description="Kart güvenlik kodu (3-4 hane)", example="123")
+    number: str = Field(..., description="Kart numarası (16 hane)", example="5549601721207035")
+    exp_month: str = Field(..., description="Son kullanma ayı (2 hane)", example="08")
+    exp_year: str = Field(..., description="Son kullanma yılı (2 veya 4 hane)", example="2026")
+    cvc: str = Field(..., description="Kart güvenlik kodu (3-4 hane)", example="319")
     name: Optional[str] = Field("Test User", description="Kart sahibi adı")
     country: Optional[str] = Field("US", description="Ülke kodu")
     zip: Optional[str] = Field("00000", description="Posta kodu")
@@ -43,6 +43,22 @@ class CardRequest(BaseModel):
     dob: Optional[str] = Field(None, description="Doğum tarihi")
     ip: Optional[str] = Field(None, description="IP adresi")
     user_agent: Optional[str] = Field(None, description="User Agent")
+    
+    @validator('exp_month')
+    def validate_exp_month(cls, v):
+        """Ay değerini 2 haneli formata çevir"""
+        v = str(v).strip()
+        if len(v) == 1:
+            v = f"0{v}"
+        return v
+    
+    @validator('exp_year')
+    def validate_exp_year(cls, v):
+        """Yıl değerini 4 haneli formata çevir (Clover API 4 hane bekliyor)"""
+        v = str(v).strip()
+        if len(v) == 2:
+            v = f"20{v}"
+        return v
 
 class BatchCardRequest(BaseModel):
     """Batch kart kontrolü için gelen veri modeli"""
@@ -51,24 +67,6 @@ class BatchCardRequest(BaseModel):
 class ParseRequest(BaseModel):
     """Parse testi için gelen veri modeli"""
     data: Union[str, List, Dict] = Field(..., description="Parse edilecek veri")
-
-class ProcessingResponse(BaseModel):
-    """İşlem sonucu modeli"""
-    success: bool
-    status: str
-    message: str
-    error: Optional[str] = None
-    data: Optional[Dict] = None
-
-class HealthResponse(BaseModel):
-    """Sağlık kontrolü yanıtı"""
-    status: str
-    timestamp: str
-    service: str
-    version: str
-    environment: str
-    mongodb: str
-    endpoints: List[str]
 
 # ==================== KONFIGÜRASYON ====================
 CONFIG = {
@@ -87,33 +85,8 @@ CONFIG = {
 
 app = FastAPI(
     title="Clover Card Checker API",
-    description="""
-    ## Clover 0$ Charge ile Kart Doğrulama API'si
-    
-    Bu API, Clover üzerinden 0$ charge işlemi ile kartları doğrular.
-    
-    ### Özellikler:
-    - **Parser**: JSON, Pipe, CSV, Full Pipe formatlarını otomatik tanır
-    - **BIN Check**: MongoDB'den BIN bilgilerini sorgular
-    - **0$ Charge**: Clover üzerinden 0$ capture=true işlemi yapar
-    - **MongoDB**: Tüm işlemleri kaydeder
-    - **Batch**: Toplu kart kontrolü
-    
-    ### Desteklenen Formatlar:
-    - JSON: `{"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}`
-    - Pipe: `"number|month|year|cvc"`
-    - Full Pipe: `"number|month|year|cvc|name|...|email|phone|dob|ip|user_agent"`
-    - CSV: `"CardNumber,Expiry,CVV"`
-    - CreditCard: `{"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}`
-    """,
+    description="Clover 0$ Charge ile Kart Doğrulama API'si",
     version="7.0.0",
-    contact={
-        "name": "CardMarket",
-        "email": "support@cardmarket.com"
-    },
-    license_info={
-        "name": "Private",
-    },
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -385,13 +358,17 @@ class CardParser:
                     if len(month) == 1:
                         month = f"0{month}"
                     
-                    if len(year) == 4:
-                        year = year[-2:]
+                    if len(year) == 2:
+                        year = f"20{year}"
+                    elif len(year) == 4:
+                        year = year
                     
                     if month.isdigit() and year.isdigit():
                         return month, year
         
         if exp_str.isdigit() and len(exp_str) == 4:
+            return exp_str[:2], f"20{exp_str[2:]}"
+        elif exp_str.isdigit() and len(exp_str) == 6:
             return exp_str[:2], exp_str[2:]
         
         return None, None
@@ -477,15 +454,18 @@ class CloverProcessor:
         try:
             token_url = f"{self.token_api}/v1/tokens"
             
+            # Clover Token API formatı - exp_year 4 haneli olmalı
             payload = {
                 'card': {
-                    'number': card.number,
-                    'exp_month': card.exp_month,
-                    'exp_year': card.exp_year,
-                    'cvv': card.cvc,
+                    'number': card.number.strip(),
+                    'exp_month': card.exp_month.strip(),
+                    'exp_year': card.exp_year.strip(),  # Zaten 4 haneli olarak geliyor
+                    'cvv': card.cvc.strip(),
                     'brand': detect_card_brand(card.number)
                 }
             }
+            
+            logger.info(f'📤 Token payload: {json.dumps(payload)}')
             
             headers = {
                 'apikey': self.public_token,
@@ -494,14 +474,24 @@ class CloverProcessor:
             
             response = requests.post(token_url, json=payload, headers=headers)
             
+            logger.info(f'📊 Token Response Status: {response.status_code}')
+            
             if response.status_code == 200:
                 result = response.json()
+                logger.info(f'✅ Token başarılı: {result.get("id")}')
                 return True, result.get('id'), None
             else:
-                error = response.json().get('message', 'Unknown error')
-                return False, None, error
+                error_text = response.text
+                try:
+                    error_json = response.json()
+                    error_text = error_json.get('message', error_text)
+                except:
+                    pass
+                logger.error(f'❌ Token hatası: {error_text}')
+                return False, None, error_text
                 
         except Exception as e:
+            logger.error(f'❌ Token exception: {str(e)}')
             return False, None, str(e)
     
     def charge_zero_dollar(self, token: str, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
@@ -677,7 +667,6 @@ class CloverProcessor:
 
 @app.get("/", tags=["Root"])
 async def root():
-    """Ana sayfa - API bilgileri"""
     return {
         "message": "Clover Card Checker API",
         "docs": "/docs",
@@ -687,11 +676,9 @@ async def root():
     }
 
 
-@app.get("/health", response_model=HealthResponse, tags=["Health"])
+@app.get("/health", tags=["Health"])
 async def health_check():
-    """API sağlık kontrolü"""
     mongo_status = 'connected' if mongo_db else 'disconnected'
-    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -711,19 +698,8 @@ async def health_check():
     }
 
 
-@app.post("/api/v1/check", response_model=ProcessingResponse, tags=["Card Operations"])
+@app.post("/api/v1/check", tags=["Card Operations"])
 async def check_card(card_request: CardRequest):
-    """
-    Tek bir kartı 0$ charge ile doğrular.
-    
-    - **number**: Kart numarası (16 hane)
-    - **exp_month**: Son kullanma ayı (2 hane)
-    - **exp_year**: Son kullanma yılı (2 veya 4 hane)
-    - **cvc**: Kart güvenlik kodu (3-4 hane)
-    - **name**: Kart sahibi adı (opsiyonel)
-    - **email**: Email adresi (opsiyonel)
-    - **phone**: Telefon numarası (opsiyonel)
-    """
     try:
         card = CardData(
             number=card_request.number,
@@ -756,13 +732,8 @@ async def check_card(card_request: CardRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v1/check/batch", response_model=Dict, tags=["Card Operations"])
+@app.post("/api/v1/check/batch", tags=["Card Operations"])
 async def check_cards_batch(batch_request: BatchCardRequest):
-    """
-    Birden fazla kartı batch olarak doğrular.
-    
-    - **cards**: Kart listesi (en fazla 50 kart)
-    """
     try:
         processor = CloverProcessor()
         results = []
@@ -799,11 +770,6 @@ async def check_cards_batch(batch_request: BatchCardRequest):
 
 @app.post("/api/v1/parse", tags=["Parser"])
 async def parse_only(parse_request: ParseRequest):
-    """
-    Sadece parser testi yapar.
-    
-    Herhangi bir formattaki veriyi parse eder ve sonucu döndürür.
-    """
     try:
         cards = CardParser.parse(parse_request.data)
         
@@ -833,11 +799,6 @@ async def parse_only(parse_request: ParseRequest):
 
 @app.get("/api/v1/bin/{card_number}", tags=["BIN"])
 async def bin_check(card_number: str):
-    """
-    Kart numarasından BIN bilgilerini sorgular.
-    
-    - **card_number**: Kart numarası (ilk 6 hanesi BIN olarak kullanılır)
-    """
     try:
         if not mongo_db:
             raise HTTPException(status_code=500, detail="MongoDB bağlantısı yok")
@@ -867,11 +828,6 @@ async def bin_check(card_number: str):
 
 @app.get("/api/v1/check/{check_id}", tags=["Records"])
 async def get_check_record(check_id: str):
-    """
-    Kayıtlı bir kontrolü sorgular.
-    
-    - **check_id**: Kontrol ID'si (UUID formatında)
-    """
     try:
         if not mongo_db:
             raise HTTPException(status_code=500, detail="MongoDB bağlantısı yok")
@@ -895,7 +851,6 @@ async def get_check_record(check_id: str):
 
 @app.get("/api/v1/stats", tags=["Stats"])
 async def get_stats():
-    """İstatistikleri getirir."""
     try:
         if not mongo_db:
             raise HTTPException(status_code=500, detail="MongoDB bağlantısı yok")
@@ -910,21 +865,6 @@ async def get_stats():
     except Exception as e:
         logger.error(f'❌ İstatistik hatası: {str(e)}')
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# ==================== HATA YÖNETİMİ ====================
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "success": False,
-            "status": "ERROR",
-            "error": exc.detail,
-            "code": "HTTP_ERROR"
-        }
-    )
 
 
 # ==================== SUNUCUYU BAŞLAT ====================
