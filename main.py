@@ -1,6 +1,6 @@
 """
 CLOVER CARD CHECKER API - FASTAPI VERSION
-SADECE TOKEN OLUŞTURUR, CHARGE YAPMAZ
+0$ PRE-AUTHORIZATION (capture=false)
 Swagger Docs: /docs
 ReDoc: /redoc
 """
@@ -80,7 +80,7 @@ CONFIG = {
 
 app = FastAPI(
     title="Clover Card Checker API",
-    description="Clover Token Oluşturma API'si (Charge yok)",
+    description="0$ Pre-Authorization (capture=false) ile Kart Doğrulama",
     version="7.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -394,7 +394,10 @@ class CloverProcessor:
     def __init__(self):
         self.merchant_id = CONFIG['merchant_id']
         self.public_token = CONFIG['public_token']
+        self.private_token = CONFIG['private_token']
         self.token_api = CONFIG['token_api']
+        self.charge_endpoint = CONFIG['charge_endpoint']
+        self.company_id = CONFIG['company_id']
     
     def create_token(self, card: CardData) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
         try:
@@ -411,7 +414,7 @@ class CloverProcessor:
                     "exp_year": card.exp_year,
                     "cvv": card.cvc,
                     "brand": brand,
-                    "address_zip": "00000"  # Default zip
+                    "address_zip": "00000"
                 },
                 "multipay": False
             }
@@ -445,6 +448,69 @@ class CloverProcessor:
             logger.error(f'❌ Token exception: {str(e)}')
             return False, None, str(e), None
     
+    def pre_auth_zero_dollar(self, token: str, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
+        """
+        0$ Pre-Authorization (capture=false)
+        Kartı doğrulamak için kullanılır, para çekilmez
+        """
+        try:
+            charge_url = f"{self.charge_endpoint}?companyId={self.company_id}&companyType=merchant"
+            
+            payload = {
+                'amount': 0,
+                'capture': False,  # ❌ capture=false = pre-authorization
+                'tax_rate_uuid': 'FY6ZPX2PMQZM8',
+                'description': '',
+                'currency': 'USD',
+                'metadata': {
+                    'vt_payment_type': 'vt_checkout',
+                    'source_app': 'com.clover.virtualterminal',
+                    'existingDebtIndicator': 'false'
+                },
+                'ecomind': 'moto',
+                'source': token,
+                'custom_attributes': {}
+            }
+            
+            headers = {
+                'Authorization': f'Bearer {self.private_token}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/plain, */*',
+                'Origin': 'https://www.clover.com',
+                'Referer': 'https://www.clover.com/',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+            }
+            
+            logger.info(f'🔄 0$ Pre-Authorization işlemi başlatılıyor...')
+            logger.info(f'📇 Kart: {card.get_masked()}')
+            logger.info(f'🔑 Token: {token}')
+            logger.info(f'🔐 Private Token: {self.private_token[:10]}...')
+            logger.info(f'📤 Payload: {json.dumps(payload)}')
+            
+            response = requests.post(charge_url, json=payload, headers=headers)
+            
+            logger.info(f'📊 Response Status: {response.status_code}')
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f'✅ 0$ Pre-Authorization başarılı! (capture=false)')
+                logger.info(f'📋 Auth ID: {result.get("id")}')
+                return True, result.get('id'), None, result
+            else:
+                error_text = response.text
+                try:
+                    error_json = response.json()
+                    error_text = error_json.get('message', error_text)
+                except:
+                    pass
+                error_msg = f"HTTP {response.status_code}: {error_text}"
+                logger.error(f'❌ Pre-Auth hatası: {error_msg}')
+                return False, None, error_msg, response.json()
+                
+        except Exception as e:
+            logger.error(f'❌ Pre-Auth exception: {str(e)}')
+            return False, None, str(e), None
+    
     def process_card(self, card: CardData) -> Dict:
         check_id = str(uuid.uuid4())
         
@@ -468,9 +534,9 @@ class CloverProcessor:
                     'CountryName': ''
                 }
             
-            # 2. Token Oluştur (Sadece token, charge yok)
-            logger.info('🔄 Token oluşturuluyor...')
-            success, token, error, raw_response = self.create_token(card)
+            # 2. Token Oluştur
+            logger.info('🔄 Adım 1/2: Token oluşturuluyor...')
+            success, token, error, token_response = self.create_token(card)
             
             if not success:
                 logger.error(f'❌ Token oluşturulamadı: {error}')
@@ -482,12 +548,32 @@ class CloverProcessor:
                     'bin_info': bin_info,
                     'check_id': check_id,
                     'token': None,
-                    'raw_response': raw_response
+                    'auth_id': None
                 }
             
             logger.info(f'✅ Token oluşturuldu: {token}')
             
-            # 3. MongoDB'ye kaydet (charge yok)
+            # 3. 0$ Pre-Authorization (capture=false)
+            logger.info('🔄 Adım 2/2: 0$ Pre-Authorization yapılıyor...')
+            success, auth_id, error, preauth_response = self.pre_auth_zero_dollar(token, card, bin_info)
+            
+            if not success:
+                logger.error(f'❌ 0$ Pre-Authorization başarısız: {error}')
+                return {
+                    'success': False,
+                    'status': 'PREAUTH_FAILED',
+                    'message': '0$ Pre-Authorization başarısız',
+                    'error': error,
+                    'token': token,
+                    'bin_info': bin_info,
+                    'check_id': check_id,
+                    'auth_id': None,
+                    'raw_response': preauth_response
+                }
+            
+            logger.info(f'✅ 0$ Pre-Authorization başarılı! Auth ID: {auth_id}')
+            
+            # 4. MongoDB'ye kaydet
             if mongo_db:
                 record = {
                     'check_id': check_id,
@@ -503,26 +589,31 @@ class CloverProcessor:
                     'card_country_name': bin_info.get('CountryName'),
                     'bin_prefix': bin_info.get('BIN'),
                     'token': token,
-                    'charge_id': None,
+                    'auth_id': auth_id,
                     'amount': 0,
                     'currency': 'USD',
-                    'status': 'TOKEN_CREATED',
-                    'response_message': 'Token başarıyla oluşturuldu (charge yapılmadı)',
-                    'is_zero_dollar': False,
-                    'raw_response': json.dumps(raw_response) if raw_response else None
+                    'status': 'PRE_AUTHORIZED',
+                    'response_message': 'Kart başarıyla doğrulandı (0$ pre-auth, capture=false)',
+                    'is_zero_dollar': True,
+                    'is_preauth': True,
+                    'raw_response': json.dumps(preauth_response) if preauth_response else None
                 }
                 mongo_db.insert_record(record)
             
             return {
                 'success': True,
-                'status': 'TOKEN_CREATED',
-                'message': 'Token başarıyla oluşturuldu (charge yapılmadı)',
+                'status': 'PRE_AUTHORIZED',
+                'message': 'Kart başarıyla doğrulandı (0$ pre-auth, capture=false)',
                 'token': token,
+                'auth_id': auth_id,
                 'bin_info': bin_info,
                 'check_id': check_id,
                 'card_masked': card.get_masked(),
                 'card_brand': bin_info.get('Brand'),
-                'card_last4': card.number[-4:]
+                'card_last4': card.number[-4:],
+                'amount': 0,
+                'currency': 'USD',
+                'capture': False
             }
             
         except Exception as e:
@@ -541,7 +632,7 @@ class CloverProcessor:
 @app.get("/", tags=["Root"])
 async def root():
     return {
-        "message": "Clover Card Checker API (Token Only)",
+        "message": "Clover Card Checker API (0$ Pre-Auth)",
         "docs": "/docs",
         "redoc": "/redoc",
         "health": "/health",
@@ -555,7 +646,7 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "Clover Card Check API (Token Only)",
+        "service": "Clover Card Check API (0$ Pre-Auth)",
         "version": "7.0.0",
         "environment": "LIVE",
         "mongodb": mongo_status,
@@ -563,8 +654,8 @@ async def health_check():
             "merchant_id": CONFIG['merchant_id'][:4] + '***'
         },
         "endpoints": [
-            "POST /api/v1/check - Token oluştur (charge yok)",
-            "POST /api/v1/check/batch - Toplu token oluştur",
+            "POST /api/v1/check - 0$ Pre-Auth (capture=false)",
+            "POST /api/v1/check/batch - Toplu 0$ Pre-Auth",
             "POST /api/v1/parse - Sadece parse test",
             "GET /api/v1/bin/{card} - BIN kontrolü",
             "GET /api/v1/check/{id} - Kayıt sorgula",
@@ -750,15 +841,16 @@ if __name__ == '__main__':
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
     print('=' * 60)
-    print('🏦 Clover Card Checker API (Token Only)')
+    print('🏦 Clover Card Checker API (0$ Pre-Auth)')
     print('=' * 60)
     print(f'📍 Sunucu: http://localhost:{port}')
     print(f'📚 Swagger Docs: http://localhost:{port}/docs')
     print(f'📖 ReDoc: http://localhost:{port}/redoc')
     print(f'🔧 Debug: {debug}')
     print(f'🌍 Environment: LIVE')
-    print(f'💳 Sadece Token Oluşturulur, Charge Yapılmaz')
+    print(f'💳 0$ Pre-Authorization (capture=false)')
     print(f'🔐 Public Token: {CONFIG["public_token"][:10]}...')
+    print(f'🔐 Private Token: {CONFIG["private_token"][:10]}...')
     print('=' * 60)
     
     uvicorn.run(
