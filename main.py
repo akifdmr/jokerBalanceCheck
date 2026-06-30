@@ -1,6 +1,6 @@
 """
 CLOVER CARD CHECKER API - 0$ CHARGE VERSION
-0$ charge ile kart doğrulama
+Tüm konfigürasyon koda gömülüdür. .env dosyası gerekmez.
 """
 import os
 import re
@@ -13,12 +13,10 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 
-load_dotenv()
-
+# Logging ayarları
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -28,19 +26,26 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# ==================== KONFIGÜRASYON ====================
+# ==================== KONFIGÜRASYON (KOD İÇİNE GÖMÜLÜ) ====================
 CONFIG = {
-    'merchant_id': os.getenv('CLOVER_MERCHANT_ID', '518993421163932'),
-    'public_token': os.getenv('CLOVER_ECOMM_PUBLIC_TOKEN', '0c61457d01450a5e05bbc10068483a70'),
-    'private_token': os.getenv('CLOVER_ECOMM_PRIVATE_TOKEN', 'c7ee250b-e9ae-ab59-ba52-616ecc63ed29'),
-    'api_base': os.getenv('CLOVER_API_BASE', 'https://api.clover.com'),
-    'token_api': os.getenv('CLOVER_TOKEN_API', 'https://token.clover.com'),
-    'charge_endpoint': os.getenv('CLOVER_CHARGE_ENDPOINT', 'https://www.clover.com/scl/v1/merchant/YHQFFZ1ZDDT61/charge'),
-    'company_id': os.getenv('CLOVER_COMPANY_ID', 'YHQFFZ1ZDDT61'),
-    'mongo_uri': os.getenv('MONGO_URI'),
-    'mongo_database': os.getenv('MONGO_DATABASE', 'mydb'),
-    'mongo_collection': os.getenv('MONGO_COLLECTION', 'card_checks'),
-    'mongo_bin_collection': os.getenv('MONGO_BIN_COLLECTION', 'binList')
+    # Clover LIVE Bilgileri
+    'merchant_id': '518993421163932',
+    'public_token': '0c61457d01450a5e05bbc10068483a70',
+    'private_token': 'c7ee250b-e9ae-ab59-ba52-616ecc63ed29',
+    
+    # Clover API Endpoints
+    'api_base': 'https://api.clover.com',
+    'token_api': 'https://token.clover.com',
+    
+    # Charge Endpoint
+    'charge_endpoint': 'https://www.clover.com/scl/v1/merchant/YHQFFZ1ZDDT61/charge',
+    'company_id': 'YHQFFZ1ZDDT61',
+    
+    # MongoDB
+    'mongo_uri': 'mongodb+srv://cardmarketApp:gnbqHdTrlceMZjOS@paymentmanger.gvaavzc.mongodb.net/mydb?retryWrites=true&w=majority',
+    'mongo_database': 'mydb',
+    'mongo_collection': 'card_checks',
+    'mongo_bin_collection': 'binList'
 }
 
 # ==================== DATA CLASSES ====================
@@ -420,7 +425,6 @@ class CloverProcessor:
         self.token_api = CONFIG['token_api']
         self.charge_endpoint = CONFIG['charge_endpoint']
         self.company_id = CONFIG['company_id']
-        self.api_base = CONFIG['api_base']
         
     def create_token(self, card: CardData) -> Tuple[bool, Optional[str], Optional[str]]:
         try:
@@ -454,13 +458,9 @@ class CloverProcessor:
             return False, None, str(e)
     
     def charge_zero_dollar(self, token: str, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
-        """
-        0$ Charge işlemi - Başarılı payload ile
-        """
         try:
             charge_url = f"{self.charge_endpoint}?companyId={self.company_id}&companyType=merchant"
             
-            # 0$ charge payload (başarılı olan)
             payload = {
                 'amount': 0,
                 'capture': True,
@@ -874,7 +874,7 @@ def health_check():
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
         'service': 'Clover Card Check API (0$ Charge)',
-        'version': '6.0.0',
+        'version': '7.0.0',
         'environment': 'LIVE',
         'mongodb': mongo_status,
         'clover': {
@@ -925,6 +925,7 @@ def internal_error(error):
 
 # ==================== SUNUCUYU BAŞLAT ====================
 
+# Render/Heroku/Cloud için uygulama nesnesi
 application = app
 
 if __name__ == '__main__':
@@ -947,6 +948,22 @@ if __name__ == '__main__':
     print('  GET  /api/v1/check/<id>   - Kayıt sorgula')
     print('  GET  /api/v1/stats        - İstatistikler')
     print('  GET  /health              - Sağlık kontrolü')
+    
+    print('\n📝 Desteklenen Formatlar:')
+    print('  ✅ JSON: {"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}')
+    print('  ✅ Pipe: "number|month|year|cvc"')
+    print('  ✅ JSON Array: [{"number": "...", ...}]')
+    print('  ✅ CreditCard: {"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}')
+    print('  ✅ CardInfo: {"CardInfo": {"CardNumber": "...", "Expiration": "...", "CVV": "..."}}')
+    print('  ✅ CSV: "CardNumber,Expiry,CVV"')
+    print('  ✅ Full Pipe: "number|month|year|cvc|name|...|email|phone|dob|ip|user_agent"')
+    
+    print('\n💳 0$ Charge Akışı:')
+    print('  1. Kart verisi parse edilir (otomatik format tespiti)')
+    print('  2. BIN check yapılır (MongoDB)')
+    print('  3. Token oluşturulur (Clover)')
+    print('  4. 0$ Capture=true charge yapılır')
+    print('  5. Sonuç MongoDB\'ye kaydedilir')
     print('=' * 60)
     
     app.run(host='0.0.0.0', port=port, debug=debug)
