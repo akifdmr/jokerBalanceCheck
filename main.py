@@ -69,7 +69,7 @@ class ParseRequest(BaseModel):
 CONFIG = {
     # PayPal REST API Bilgileri (LIVE) - Koda gömüldü
     'paypal_client_id': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
-    'paypal_client_secret': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
+    'paypal_client_secret': 'EDdrMKnpxsjdk_MaGcAbTUP_boVPh8jx0w1HNu8c18nbC2j8nL0b1FFYjH0eJSFcPyewmDQv6T0as9n5',
     'paypal_api_base': 'https://api-m.paypal.com',  # LIVE
     
     # MongoDB
