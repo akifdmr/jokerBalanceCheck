@@ -686,11 +686,3 @@ if __name__ == '__main__':
     print(f'🔐 PayPal Client ID: {CONFIG["paypal_client_id"][:10]}...')
     print('=' * 60)
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=debug, log_level="info")
-
-
-    # PayPal token almayı test et
-curl -X POST "https://api-m.sandbox.paypal.com/v1/oauth2/token" \
-  -H "Accept: application/json" \
-  -H "Accept-Language: en_US" \
-  -u "YOUR_CLIENT_ID:YOUR_CLIENT_SECRET" \
-  -d "grant_type=client_credentials"
