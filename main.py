@@ -1,7 +1,12 @@
 """
-CLOVER CARD CHECKER API - 0$ CAPTURE (CHARGE ENDPOINT)
-Önce parser'dan geçirir, BIN check yapar, Clover ile tokenize eder, 0$ capture=true yapar.
-Sadece API olarak çalışır.
+CLOVER CARD CHECKER API - TAM ENTEGRASYON
+Özellikler:
+- Otomatik Parser (JSON, Pipe, CSV, tüm formatlar)
+- BIN Check (MongoDB'den)
+- 0$ Capture (Clover Charge API)
+- MongoDB Kayıt
+- Tekil ve Toplu İşlem
+- Render/Heroku/Cloud Uyumlu
 """
 import os
 import re
@@ -66,9 +71,11 @@ class CardData:
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def get_masked(self) -> str:
+        """Maskeli kart numarası"""
         return f"{self.number[:4]}****{self.number[-4:]}"
     
     def get_bin(self) -> str:
+        """BIN prefix'ini döndür"""
         return self.number[:6]
 
 
@@ -89,6 +96,7 @@ class ProcessingResult:
     raw_response: Optional[Dict] = None
     
     def to_dict(self) -> Dict:
+        """Dict'e çevir"""
         return {
             'success': self.success,
             'status': self.status,
@@ -113,12 +121,27 @@ class CardParser:
     
     @staticmethod
     def parse(data: Union[str, List, Dict]) -> List[CardData]:
+        """
+        Ana parse fonksiyonu - otomatik format tespiti
+        
+        Desteklenen formatlar:
+        - JSON: {"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}
+        - JSON Array: [{"number": "...", ...}]
+        - CreditCard Wrapper: {"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}
+        - CardInfo Wrapper: {"CardInfo": {"CardNumber": "...", "Expiration": "...", "CVV": "..."}}
+        - Pipe: "number|month|year|cvc"
+        - Full Pipe: "number|month|year|cvc|name|...|email|phone|dob|ip|user_agent"
+        - CSV: "CardNumber,Expiry,CVV"
+        """
+        # JSON ise
         if isinstance(data, (list, dict)):
             return CardParser._parse_json(data)
         
+        # String ise
         if isinstance(data, str):
             data = data.strip()
             
+            # JSON string kontrolü
             if data.startswith('[') or data.startswith('{'):
                 try:
                     json_data = json.loads(data)
@@ -126,12 +149,14 @@ class CardParser:
                 except:
                     pass
             
+            # Pipe formatı
             if '|' in data:
                 if len(data.split('|')) > 10:
                     return CardParser._parse_full_pipe(data)
                 else:
                     return CardParser._parse_pipe(data)
             
+            # CSV formatı
             if ',' in data and '\n' in data:
                 return CardParser._parse_csv(data)
         
@@ -139,6 +164,7 @@ class CardParser:
     
     @staticmethod
     def _parse_pipe(data: str) -> List[CardData]:
+        """Pipe (|) ile ayrılmış formatı parse et"""
         cards = []
         lines = data.strip().split('\n')
         
@@ -168,6 +194,7 @@ class CardParser:
     
     @staticmethod
     def _parse_full_pipe(data: str) -> List[CardData]:
+        """Tam pipe formatını parse et (kişisel bilgiler içerir)"""
         cards = []
         lines = data.strip().split('\n')
         
@@ -210,9 +237,11 @@ class CardParser:
     
     @staticmethod
     def _parse_csv(data: str) -> List[CardData]:
+        """CSV formatını parse et"""
         cards = []
         lines = data.strip().split('\n')
         
+        # Başlık satırını kontrol et
         header = lines[0].lower() if lines else ""
         has_header = 'card' in header or 'number' in header or 'cc' in header
         
@@ -244,6 +273,7 @@ class CardParser:
     
     @staticmethod
     def _parse_json(data: Union[List, Dict]) -> List[CardData]:
+        """JSON formatını parse et"""
         cards = []
         
         if not isinstance(data, list):
@@ -258,8 +288,20 @@ class CardParser:
     
     @staticmethod
     def _parse_expiration(exp_str: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Çeşitli tarih formatlarını parse et
+        
+        Desteklenen formatlar:
+        - 12/2030
+        - 12/30
+        - 12-2030
+        - 12|2030
+        - 122030
+        - 3223 (03/23)
+        """
         exp_str = exp_str.strip()
         
+        # Ay/Yıl ayırıcıları
         separators = ['/', '-', '|', ' ']
         for sep in separators:
             if sep in exp_str:
@@ -277,6 +319,7 @@ class CardParser:
                     if month.isdigit() and year.isdigit():
                         return month, year
         
+        # Sadece sayı varsa (3223 -> 03/23)
         if exp_str.isdigit() and len(exp_str) == 4:
             return exp_str[:2], exp_str[2:]
         
@@ -284,6 +327,9 @@ class CardParser:
     
     @staticmethod
     def _extract_from_json_item(item: Dict) -> Optional[CardData]:
+        """JSON objesinden kart verisini çıkar"""
+        
+        # Format 1: Direct fields
         if 'number' in item:
             number = item['number']
             exp_month = item.get('exp_month') or item.get('month')
@@ -298,6 +344,7 @@ class CardParser:
                     cvc=str(cvc)
                 )
         
+        # Format 2: CreditCard wrapper
         if 'CreditCard' in item:
             cc = item['CreditCard']
             number = cc.get('CardNumber') or cc.get('number')
@@ -314,6 +361,7 @@ class CardParser:
                         cvc=str(cvc)
                     )
         
+        # Format 3: CardInfo wrapper
         if 'CardInfo' in item:
             ci = item['CardInfo']
             number = ci.get('CardNumber') or ci.get('number')
@@ -345,6 +393,7 @@ class MongoDB:
         return cls._instance
     
     def _initialize(self):
+        """MongoDB bağlantısını başlat"""
         try:
             self.client = MongoClient(CONFIG['mongo_uri'])
             self.client.admin.command('ping')
@@ -352,6 +401,7 @@ class MongoDB:
             self.collection = self.db[CONFIG['mongo_collection']]
             self.bin_collection = self.db[CONFIG['mongo_bin_collection']]
             
+            # Index'ler
             self.collection.create_index('check_id', unique=True)
             self.collection.create_index('created_at')
             self.collection.create_index('card_last4')
@@ -359,12 +409,19 @@ class MongoDB:
             self.bin_collection.create_index('BIN', unique=True)
             
             logger.info('✅ MongoDB bağlantısı başarılı')
+            logger.info(f'📁 Database: {CONFIG["mongo_database"]}')
+            logger.info(f'📂 Collection: {CONFIG["mongo_collection"]}')
+            logger.info(f'📂 BIN Collection: {CONFIG["mongo_bin_collection"]}')
             
         except ConnectionFailure as e:
             logger.error(f'❌ MongoDB bağlantı hatası: {str(e)}')
             raise
+        except Exception as e:
+            logger.error(f'❌ MongoDB başlatma hatası: {str(e)}')
+            raise
     
     def get_bin_info(self, card_number: str) -> Optional[Dict]:
+        """Kart numarasından BIN bilgilerini sorgula"""
         try:
             bin_prefixes = [card_number[:6], card_number[:5], card_number[:4]]
             
@@ -373,8 +430,10 @@ class MongoDB:
                 if result:
                     if '_id' in result:
                         result['_id'] = str(result['_id'])
+                    logger.info(f'✅ BIN bulundu: {bin_prefix}')
                     return result
             
+            logger.warning(f'⚠️ BIN bulunamadı: {card_number[:6]}')
             return None
             
         except Exception as e:
@@ -382,6 +441,7 @@ class MongoDB:
             return None
     
     def insert_record(self, data: Dict) -> str:
+        """Kayıt ekle"""
         try:
             if 'created_at' not in data:
                 data['created_at'] = datetime.now().isoformat()
@@ -394,6 +454,36 @@ class MongoDB:
             
         except Exception as e:
             logger.error(f'❌ Kayıt ekleme hatası: {str(e)}')
+            raise
+    
+    def get_record(self, check_id: str) -> Optional[Dict]:
+        """Kayıt getir"""
+        try:
+            result = self.collection.find_one({'check_id': check_id})
+            if result and '_id' in result:
+                result['_id'] = str(result['_id'])
+            return result
+        except Exception as e:
+            logger.error(f'❌ Kayıt getirme hatası: {str(e)}')
+            raise
+    
+    def get_stats(self) -> Dict:
+        """İstatistik getir"""
+        try:
+            total = self.collection.count_documents({})
+            
+            from datetime import datetime, timedelta
+            last_24h = datetime.now() - timedelta(days=1)
+            last_24h_count = self.collection.count_documents({
+                'created_at': {'$gte': last_24h.isoformat()}
+            })
+            
+            return {
+                'total_records': total,
+                'last_24h': last_24h_count
+            }
+        except Exception as e:
+            logger.error(f'❌ İstatistik hatası: {str(e)}')
             raise
 
 
@@ -417,6 +507,7 @@ class CloverProcessor:
         self.token_api = CONFIG['token_api']
         self.charge_endpoint = CONFIG['charge_endpoint']
         self.company_id = CONFIG['company_id']
+        self.api_base = CONFIG['api_base']
         
     def create_token(self, card: CardData) -> Tuple[bool, Optional[str], Optional[str]]:
         """Clover token oluştur"""
@@ -636,6 +727,7 @@ class CloverProcessor:
 # ==================== YARDIMCI FONKSİYONLAR ====================
 
 def detect_card_brand(card_number: str) -> str:
+    """Kart markasını tespit et"""
     patterns = {
         'VISA': r'^4',
         'MASTERCARD': r'^(5[1-5]|2[2-7])',
@@ -648,6 +740,11 @@ def detect_card_brand(card_number: str) -> str:
         if re.match(pattern, card_number):
             return brand
     return 'UNKNOWN'
+
+
+def parse_card_data(data: Union[str, List, Dict]) -> List[CardData]:
+    """Ana parser fonksiyonu"""
+    return CardParser.parse(data)
 
 
 # ==================== API ENDPOINT'LER ====================
@@ -674,6 +771,9 @@ def check_card():
     [
         {"number": "6011361000006668", "exp_month": "12", "exp_year": "2030", "cvc": "123"}
     ]
+    
+    4. CreditCard Wrapper:
+    {"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}
     """
     try:
         data = request.get_json()
@@ -696,7 +796,8 @@ def check_card():
                 'supported_formats': [
                     'JSON: {"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}',
                     'Pipe: "number|month|year|cvc"',
-                    'JSON Array: [{"number": "...", ...}]'
+                    'JSON Array: [{"number": "...", ...}]',
+                    'CreditCard: {"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}'
                 ]
             }), 400
         
@@ -724,7 +825,17 @@ def check_card():
 
 @app.route('/api/v1/check/batch', methods=['POST'])
 def check_cards_batch():
-    """Birden fazla kartı kontrol et"""
+    """
+    Birden fazla kartı kontrol et
+    
+    Request Body:
+    {
+        "cards": [
+            {"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."},
+            ...
+        ]
+    }
+    """
     try:
         data = request.get_json()
         
@@ -768,7 +879,11 @@ def check_cards_batch():
 
 @app.route('/api/v1/parse', methods=['POST'])
 def parse_only():
-    """Sadece parser test et"""
+    """
+    Sadece parser test et - kart verisini parse et
+    
+    Request Body: Herhangi bir formatta kart verisi
+    """
     try:
         data = request.get_json()
         
@@ -790,7 +905,10 @@ def parse_only():
                     'exp_year': card.exp_year,
                     'cvc': card.cvc,
                     'name': card.name,
-                    'email': card.email
+                    'email': card.email,
+                    'phone': card.phone,
+                    'country': card.country,
+                    'zip': card.zip
                 }
                 for card in cards
             ]
@@ -806,7 +924,12 @@ def parse_only():
 
 @app.route('/api/v1/bin/<card_number>', methods=['GET'])
 def bin_check(card_number: str):
-    """BIN kontrolü"""
+    """
+    BIN kontrolü
+    
+    Args:
+        card_number: Kart numarası
+    """
     try:
         if not mongo_db:
             return jsonify({
@@ -846,16 +969,13 @@ def get_check_record(check_id: str):
                 'error': 'MongoDB bağlantısı yok'
             }), 500
         
-        record = mongo_db.collection.find_one({'check_id': check_id})
+        record = mongo_db.get_record(check_id)
         
         if not record:
             return jsonify({
                 'success': False,
                 'error': 'Kayıt bulunamadı'
             }), 404
-        
-        if '_id' in record:
-            record['_id'] = str(record['_id'])
         
         return jsonify({
             'success': True,
@@ -864,6 +984,31 @@ def get_check_record(check_id: str):
         
     except Exception as e:
         logger.error(f'❌ Sorgulama hatası: {str(e)}')
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/v1/stats', methods=['GET'])
+def get_stats():
+    """İstatistikleri getir"""
+    try:
+        if not mongo_db:
+            return jsonify({
+                'success': False,
+                'error': 'MongoDB bağlantısı yok'
+            }), 500
+        
+        stats = mongo_db.get_stats()
+        
+        return jsonify({
+            'success': True,
+            'stats': stats
+        })
+        
+    except Exception as e:
+        logger.error(f'❌ İstatistik hatası: {str(e)}')
         return jsonify({
             'success': False,
             'error': str(e)
@@ -885,18 +1030,60 @@ def health_check():
         'clover': {
             'merchant_id': CONFIG['merchant_id'][:4] + '***' if CONFIG['merchant_id'] else None,
             'charge_endpoint': CONFIG['charge_endpoint']
-        }
+        },
+        'endpoints': [
+            'POST /api/v1/check - Kart kontrolü (0$ capture)',
+            'POST /api/v1/check/batch - Toplu kart kontrolü',
+            'POST /api/v1/parse - Sadece parse test',
+            'GET /api/v1/bin/<card> - BIN kontrolü',
+            'GET /api/v1/check/<id> - Kayıt sorgula',
+            'GET /api/v1/stats - İstatistikler',
+            'GET /health - Sağlık kontrolü'
+        ]
     })
 
 
+# ==================== HATA YÖNETİMİ ====================
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({
+        'success': False,
+        'status': 'ERROR',
+        'error': 'Endpoint bulunamadı',
+        'code': 'NOT_FOUND'
+    }), 404
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+    return jsonify({
+        'success': False,
+        'status': 'ERROR',
+        'error': 'Bu method desteklenmiyor',
+        'code': 'METHOD_NOT_ALLOWED'
+    }), 405
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({
+        'success': False,
+        'status': 'ERROR',
+        'error': 'Sunucu hatası',
+        'code': 'INTERNAL_ERROR'
+    }), 500
+
+
 # ==================== SUNUCUYU BAŞLAT ====================
+
+# Render/Heroku/Cloud için uygulama nesnesi
+application = app
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 3000))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
     print('=' * 60)
-    print('🏦 Clover Card Checker API (0$ Capture)')
+    print('🏦 Clover Card Checker API (Tam Entegrasyon)')
     print('=' * 60)
     print(f'📍 Sunucu: http://localhost:{port}')
     print(f'🔧 Debug: {debug}')
@@ -908,615 +1095,23 @@ if __name__ == '__main__':
     print('  POST /api/v1/parse        - Sadece parse test')
     print('  GET  /api/v1/bin/<card>   - BIN kontrolü')
     print('  GET  /api/v1/check/<id>   - Kayıt sorgula')
+    print('  GET  /api/v1/stats        - İstatistikler')
     print('  GET  /health              - Sağlık kontrolü')
     
-    print('\n🔐 Clover Konfigürasyonu:')
-    print(f'  Merchant ID: {CONFIG["merchant_id"]}')
-    print(f'  Company ID: {CONFIG["company_id"]}')
-    print(f'  Charge Endpoint: {CONFIG["charge_endpoint"]}')
+    print('\n📝 Desteklenen Formatlar:')
+    print('  ✅ JSON: {"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}')
+    print('  ✅ Pipe: "number|month|year|cvc"')
+    print('  ✅ JSON Array: [{"number": "...", ...}]')
+    print('  ✅ CreditCard: {"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}')
+    print('  ✅ CardInfo: {"CardInfo": {"CardNumber": "...", "Expiration": "...", "CVV": "..."}}')
+    print('  ✅ CSV: "CardNumber,Expiry,CVV"')
     
     print('\n💳 0$ Capture Akışı:')
-    print('  1. Kart verisi parse edilir')
+    print('  1. Kart verisi parse edilir (otomatik format tespiti)')
     print('  2. BIN check yapılır (MongoDB)')
     print('  3. Token oluşturulur (Clover)')
     print('  4. 0$ Capture=true charge yapılır')
     print('  5. Sonuç MongoDB\'ye kaydedilir')
     print('=' * 60)
     
-    app.run(host='0.0.0.0', port=port, debug=debug)            if re.match(pattern, self.number):
-                return brand
-        return "UNKNOWN"
-
-
-@dataclass
-class ProcessingResult:
-    card: CardData
-    success: bool
-    status: str
-    message: str
-    error: Optional[str] = None
-    token_id: Optional[str] = None
-    payment_id: Optional[str] = None
-    auth_id: Optional[str] = None
-    requires_action: bool = False
-    redirect_url: Optional[str] = None
-    raw_response: Optional[Dict] = None
-
-
-# ============================================
-# 2. API REQUEST MODELS
-# ============================================
-
-class CardCheckRequest(BaseModel):
-    cards: Union[str, List[Dict], Dict] = Field(..., description="Kart verileri")
-    customer_id: Optional[str] = Field(None)
-
-
-class ParseRequest(BaseModel):
-    data: Union[str, List[Dict], Dict] = Field(...)
-    return_type: str = Field("json")
-
-
-class SingleCardCheckRequest(BaseModel):
-    card: Union[str, Dict] = Field(...)
-    customer_id: Optional[str] = Field(None)
-
-
-# ============================================
-# 3. CARD PARSER (Aynı - Değişmedi)
-# ============================================
-
-class CardParser:
-    @staticmethod
-    def parse(data: Union[str, List, Dict]) -> List[CardData]:
-        if isinstance(data, (list, dict)):
-            return CardParser._parse_json(data)
-        if isinstance(data, str):
-            data = data.strip()
-            if data.startswith('[') or data.startswith('{'):
-                try:
-                    json_data = json.loads(data)
-                    return CardParser._parse_json(json_data)
-                except:
-                    pass
-            if '|' in data:
-                return CardParser._parse_pipe(data)
-        return []
-
-    @staticmethod
-    def _parse_pipe(data: str) -> List[CardData]:
-        cards = []
-        lines = data.strip().split('\n')
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split('|')
-            if len(parts) < 3:
-                continue
-            number = parts[0].strip()
-            if len(parts) >= 4 and parts[1].strip().isdigit() and parts[2].strip().isdigit():
-                exp_part = f"{parts[1].strip()}/{parts[2].strip()}"
-                cvc = parts[3].strip()
-                metadata_offset = 1
-            else:
-                exp_part = parts[1].strip()
-                cvc = parts[2].strip()
-                metadata_offset = 0
-            exp_month, exp_year = CardParser._parse_expiration(exp_part)
-            if not number or not exp_month or not exp_year or not cvc:
-                continue
-            name = "Test User"
-            if len(parts) > 3 + metadata_offset:
-                name = parts[3 + metadata_offset].strip() or "Test User"
-            phone = None
-            email = None
-            dob = None
-            ip = None
-            user_agent = None
-            if len(parts) > 9 + metadata_offset:
-                phone = parts[9 + metadata_offset].strip()
-            if len(parts) > 10 + metadata_offset:
-                email = parts[10 + metadata_offset].strip()
-            if len(parts) > 11 + metadata_offset:
-                dob = parts[11 + metadata_offset].strip()
-            if len(parts) > 12 + metadata_offset:
-                ip = parts[12 + metadata_offset].strip()
-            if len(parts) > 13 + metadata_offset:
-                user_agent = parts[13 + metadata_offset].strip()
-            cards.append(CardData(
-                number=number,
-                exp_month=exp_month,
-                exp_year=exp_year,
-                cvc=cvc,
-                name=name,
-                phone=phone,
-                email=email,
-                dob=dob,
-                ip=ip,
-                user_agent=user_agent
-            ))
-        return cards
-
-    @staticmethod
-    def _parse_json(data: Union[List, Dict]) -> List[CardData]:
-        cards = []
-        if not isinstance(data, list):
-            data = [data]
-        for item in data:
-            card_data = CardParser._extract_from_json_item(item)
-            if card_data:
-                cards.append(card_data)
-        return cards
-
-    @staticmethod
-    def _parse_expiration(exp_str: str) -> Tuple[Optional[str], Optional[str]]:
-        exp_str = exp_str.strip()
-        separators = ['/', '-', '|', ' ']
-        for sep in separators:
-            if sep in exp_str:
-                parts = exp_str.split(sep)
-                if len(parts) == 2:
-                    month = parts[0].strip()
-                    year = parts[1].strip()
-                    if len(month) == 1:
-                        month = f"0{month}"
-                    if len(year) == 4:
-                        year = year[-2:]
-                    if month.isdigit() and year.isdigit():
-                        month_int = int(month)
-                        if 1 <= month_int <= 12:
-                            return month, year
-        if exp_str.isdigit() and len(exp_str) == 4:
-            month = exp_str[:2]
-            year = exp_str[2:]
-            month_int = int(month)
-            if 1 <= month_int <= 12:
-                return month, year
-        return None, None
-
-    @staticmethod
-    def _extract_from_json_item(item: Dict) -> Optional[CardData]:
-        try:
-            if 'number' in item:
-                number = item['number']
-                exp_month = item.get('exp_month') or item.get('month')
-                exp_year = item.get('exp_year') or item.get('year')
-                cvc = item.get('cvc') or item.get('cvv') or item.get('CVV')
-                if number and exp_month and exp_year and cvc:
-                    exp_month = str(exp_month).zfill(2)
-                    exp_year = str(exp_year)
-                    if len(exp_year) == 4:
-                        exp_year = exp_year[-2:]
-                    return CardData(
-                        number=str(number),
-                        exp_month=exp_month,
-                        exp_year=exp_year,
-                        cvc=str(cvc)
-                    )
-            if 'CreditCard' in item:
-                cc = item['CreditCard']
-                number = cc.get('CardNumber') or cc.get('number')
-                exp = cc.get('Exp') or cc.get('exp') or cc.get('expiration')
-                cvc = cc.get('CVV') or cc.get('cvv') or cc.get('cvc')
-                if number and exp and cvc:
-                    exp_month, exp_year = CardParser._parse_expiration(str(exp))
-                    if exp_month and exp_year:
-                        return CardData(
-                            number=str(number),
-                            exp_month=exp_month,
-                            exp_year=exp_year,
-                            cvc=str(cvc)
-                        )
-            if 'CardInfo' in item:
-                ci = item['CardInfo']
-                number = ci.get('CardNumber') or ci.get('number')
-                exp = ci.get('Expiration') or ci.get('exp')
-                cvc = ci.get('CVV') or ci.get('cvc')
-                if number and exp and cvc:
-                    exp_month, exp_year = CardParser._parse_expiration(str(exp))
-                    if exp_month and exp_year:
-                        return CardData(
-                            number=str(number),
-                            exp_month=exp_month,
-                            exp_year=exp_year,
-                            cvc=str(cvc)
-                        )
-            if 'card' in item and isinstance(item['card'], str):
-                card_str = item['card']
-                parts = card_str.split('|')
-                if len(parts) >= 3:
-                    number = parts[0].strip()
-                    exp_part = parts[1].strip()
-                    cvc = parts[2].strip()
-                    exp_month, exp_year = CardParser._parse_expiration(exp_part)
-                    if number and exp_month and exp_year and cvc:
-                        return CardData(
-                            number=number,
-                            exp_month=exp_month,
-                            exp_year=exp_year,
-                            cvc=cvc
-                        )
-            return None
-        except Exception:
-            return None
-
-
-def parse_card_data(data: Union[str, List, Dict]) -> List[CardData]:
-    return CardParser.parse(data)
-
-
-def parse_card_data_single(data: Union[str, Dict]) -> Optional[CardData]:
-    results = CardParser.parse(data)
-    return results[0] if results else None
-
-
-# ============================================
-# 4. CLOVER PROCESSOR (GÜNCELLENDİ)
-# ============================================
-
-class CloverProcessor:
-    def __init__(self):
-        self.merchant_id = CLOVER_MERCHANT_ID
-        self.company_id = CLOVER_COMPANY_ID
-        self.public_token = CLOVER_ECOMM_PUBLIC_TOKEN
-        self.private_token = CLOVER_ECOMM_PRIVATE_TOKEN
-        self.api_base = CLOVER_API_BASE
-        self.token_api = CLOVER_TOKEN_API
-        
-        # Auth headers
-        self.headers = {
-            "Authorization": f"Bearer {self.private_token}",
-            "Content-Type": "application/json"
-        }
-        
-        # Token headers
-        self.token_headers = {
-            "apikey": self.public_token,
-            "content-type": "application/json"
-        }
-
-    def create_token(self, card: CardData) -> Tuple[Optional[str], Optional[str]]:
-        """Clover'da token oluştur"""
-        url = f"{self.token_api}/v1/tokens"
-        data = {
-            "card": {
-                "number": card.number,
-                "exp_month": card.exp_month,
-                "exp_year": card.exp_year,
-                "cvv": card.cvc,
-                "brand": card._detect_brand()
-            }
-        }
-        
-        try:
-            response = requests.post(url, json=data, headers=self.token_headers)
-            result = response.json()
-            
-            if response.status_code == 200:
-                token_id = result.get('id')
-                if token_id:
-                    return token_id, None
-                return None, "Token ID not found in response"
-            else:
-                error = result.get('message', result.get('error', 'Unknown error'))
-                return None, error
-                
-        except Exception as e:
-            return None, str(e)
-
-    def create_charge(self, token: str, amount: int = 0, capture: bool = False) -> Tuple[Optional[str], Optional[str], Optional[Dict]]:
-        """Clover'da charge oluştur (yeni endpoint)"""
-        # Charge URL - doğru format
-        url = f"{self.api_base}/scl/v1/merchant/{self.merchant_id}/charge"
-        
-        # Query params
-        params = {
-            "companyId": self.company_id,
-            "companyType": "merchant"
-        }
-        
-        # Charge payload
-        data = {
-            "amount": amount,  # Kuruş cinsinden (0 = 0$)
-            "capture": capture,
-            "currency": "USD",
-            "source": token,
-            "ecomind": "moto",  # Mail order / Telephone order
-            "tax_rate_uuid": "FY6ZPX2PMQZM8",
-            "metadata": {
-                "vt_payment_type": "vt_checkout",
-                "source_app": "com.clover.virtualterminal",
-                "existingDebtIndicator": "false"
-            },
-            "custom_attributes": {}
-        }
-        
-        try:
-            response = requests.post(url, json=data, params=params, headers=self.headers)
-            result = response.json()
-            
-            if response.status_code == 200:
-                payment_id = result.get('id')
-                return payment_id, None, result
-            else:
-                error = result.get('message', result.get('error', 'Unknown error'))
-                return None, error, result
-                
-        except Exception as e:
-            return None, str(e), None
-
-    def capture_payment(self, payment_id: str, amount: Optional[int] = None) -> Tuple[bool, Optional[str], Optional[Dict]]:
-        """Clover'da capture işlemi"""
-        url = f"{self.api_base}/scl/v1/merchant/{self.merchant_id}/payments/{payment_id}/capture"
-        
-        data = {}
-        if amount is not None:
-            data["amount"] = amount
-        
-        try:
-            response = requests.post(url, json=data, headers=self.headers)
-            result = response.json()
-            
-            if response.status_code == 200:
-                return True, None, result
-            else:
-                error = result.get('message', result.get('error', 'Unknown error'))
-                return False, error, result
-                
-        except Exception as e:
-            return False, str(e), None
-
-    def void_payment(self, payment_id: str) -> Tuple[bool, Optional[str], Optional[Dict]]:
-        """Clover'da void (iptal) işlemi"""
-        url = f"{self.api_base}/scl/v1/merchant/{self.merchant_id}/payments/{payment_id}/void"
-        
-        try:
-            response = requests.post(url, json={}, headers=self.headers)
-            result = response.json()
-            
-            if response.status_code == 200:
-                return True, None, result
-            else:
-                error = result.get('message', result.get('error', 'Unknown error'))
-                return False, error, result
-                
-        except Exception as e:
-            return False, str(e), None
-
-    def process_card(self, card: CardData, customer_id: Optional[str] = None) -> ProcessingResult:
-        """Kart işleme ana fonksiyonu"""
-        try:
-            # 1. Token oluştur
-            token_id, error = self.create_token(card)
-            if not token_id:
-                return ProcessingResult(
-                    card=card,
-                    success=False,
-                    status="error",
-                    message="Token creation failed",
-                    error=error
-                )
-
-            # 2. 0$ Charge oluştur (capture: false)
-            payment_id, error, response = self.create_charge(token_id, amount=0, capture=False)
-            
-            if not payment_id:
-                # 0$ çalışmazsa 1$ dene (100 kuruş)
-                payment_id, error, response = self.create_charge(token_id, amount=100, capture=False)
-                if not payment_id:
-                    # 1$ da çalışmazsa 0.50$ dene (50 kuruş)
-                    payment_id, error, response = self.create_charge(token_id, amount=50, capture=False)
-                    if not payment_id:
-                        return ProcessingResult(
-                            card=card,
-                            success=False,
-                            status="error",
-                            message="Charge creation failed",
-                            error=error,
-                            token_id=token_id
-                        )
-
-            # 3. Başarılı yanıt
-            status = response.get('status', 'unknown')
-            is_success = status in ['AUTHORIZED', 'CAPTURED', 'PAID']
-            
-            return ProcessingResult(
-                card=card,
-                success=is_success,
-                status=status,
-                message="Card verified successfully" if is_success else f"Status: {status}",
-                token_id=token_id,
-                payment_id=payment_id,
-                auth_id=payment_id,
-                raw_response=response
-            )
-
-        except Exception as e:
-            return ProcessingResult(
-                card=card,
-                success=False,
-                status="error",
-                message="Processing error",
-                error=str(e)
-            )
-
-    def process_cards(self, cards: List[CardData], customer_id: Optional[str] = None) -> List[ProcessingResult]:
-        results = []
-        for card in cards:
-            results.append(self.process_card(card, customer_id))
-        return results
-
-
-# ============================================
-# 5. FASTAPI APP (Güncellendi)
-# ============================================
-
-app = FastAPI(
-    title="Clover Card Checker API",
-    description="Live key embedded - Clover entegrasyonu",
-    version="2.0.0"
-)
-
-
-@app.get("/")
-async def root():
-    return {
-        "message": "Clover Card Checker API - Live Mode (Embedded Key)",
-        "version": "2.0.0",
-        "endpoints": {
-            "/": "Info",
-            "/health": "Health check",
-            "/parse": "Parse cards without Clover",
-            "/check": "Batch check cards",
-            "/check/single": "Check single card",
-            "/capture": "Capture a pre-authorized payment",
-            "/void": "Void a payment"
-        },
-        "docs": "/docs"
-    }
-
-
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
-
-
-@app.post("/parse")
-async def parse_cards(request: ParseRequest):
-    cards = parse_card_data(request.data)
-    if not cards:
-        raise HTTPException(status_code=400, detail="No valid cards found")
-    return {
-        "total": len(cards),
-        "cards": [
-            {
-                "masked": card.get_masked(),
-                "exp_month": card.exp_month,
-                "exp_year": card.exp_year,
-                "name": card.name,
-                "country": card.country,
-                "brand": card._detect_brand()
-            }
-            for card in cards
-        ],
-    }
-
-
-def serialize_result(result: ProcessingResult) -> Dict[str, Any]:
-    return {
-        "success": result.success,
-        "status": result.status,
-        "message": result.message,
-        "card": {
-            "masked": result.card.get_masked(),
-            "exp_month": result.card.exp_month,
-            "exp_year": result.card.exp_year,
-            "brand": result.card._detect_brand()
-        },
-        "token_id": result.token_id,
-        "payment_id": result.payment_id,
-        "auth_id": result.auth_id,
-        "requires_action": result.requires_action,
-        "redirect_url": result.redirect_url,
-        "error": result.error,
-        "timestamp": datetime.now().isoformat(),
-    }
-
-
-@app.post("/check")
-async def check_cards(request: CardCheckRequest):
-    cards = parse_card_data(request.cards)
-    if not cards:
-        raise HTTPException(status_code=400, detail="No valid cards found")
-    
-    processor = CloverProcessor()
-    results = processor.process_cards(cards, request.customer_id)
-    serialized = [serialize_result(result) for result in results]
-    
-    return {
-        "total": len(serialized),
-        "successful": sum(1 for result in results if result.success),
-        "failed": sum(1 for result in results if not result.success),
-        "results": serialized,
-    }
-
-
-@app.post("/check/single")
-async def check_single_card(request: SingleCardCheckRequest):
-    card = parse_card_data_single(request.card)
-    if card is None:
-        raise HTTPException(status_code=400, detail="No valid card found")
-    
-    processor = CloverProcessor()
-    result = processor.process_card(card, request.customer_id)
-    
-    status = "Live" if result.success else "Dead"
-    if result.token_id:
-        status += f" (Token: {result.token_id[:12]}...)"
-    
-    return PlainTextResponse(
-        f"{card.number}|{card.exp_month}|{card.exp_year}|{card.cvc}|{status}|{result.token_id or ''}"
-    )
-
-
-@app.post("/capture")
-async def capture_payment(request: Dict[str, Any]):
-    """Bir ödemeyi capture et (pre-auth'dan sonra)"""
-    payment_id = request.get('payment_id')
-    amount = request.get('amount')  # Kuruş cinsinden
-    
-    if not payment_id:
-        raise HTTPException(status_code=400, detail="payment_id required")
-    
-    processor = CloverProcessor()
-    success, error, response = processor.capture_payment(payment_id, amount)
-    
-    if success:
-        return {
-            "success": True,
-            "message": "Payment captured successfully",
-            "payment_id": payment_id,
-            "amount": amount,
-            "response": response
-        }
-    else:
-        raise HTTPException(status_code=400, detail=error or "Capture failed")
-
-
-@app.post("/void")
-async def void_payment(request: Dict[str, Any]):
-    """Bir ödemeyi iptal et"""
-    payment_id = request.get('payment_id')
-    
-    if not payment_id:
-        raise HTTPException(status_code=400, detail="payment_id required")
-    
-    processor = CloverProcessor()
-    success, error, response = processor.void_payment(payment_id)
-    
-    if success:
-        return {
-            "success": True,
-            "message": "Payment voided successfully",
-            "payment_id": payment_id,
-            "response": response
-        }
-    else:
-        raise HTTPException(status_code=400, detail=error or "Void failed")
-
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8000"))
-    print("=" * 60)
-    print("🏦 CLOVER CARD CHECKER API")
-    print("=" * 60)
-    print(f"🔑 Merchant ID: {CLOVER_MERCHANT_ID}")
-    print(f"🔐 Public Token: {CLOVER_ECOMM_PUBLIC_TOKEN[:15]}...")
-    print(f"🔒 Private Token: {CLOVER_ECOMM_PRIVATE_TOKEN[:15]}...")
-    print(f"🌐 API Base: {CLOVER_API_BASE}")
-    print(f"🚀 Server: http://0.0.0.0:{port}")
-    print(f"📚 Docs: http://0.0.0.0:{port}/docs")
-    print("=" * 60)
-    
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    app.run(host='0.0.0.0', port=port, debug=debug)
