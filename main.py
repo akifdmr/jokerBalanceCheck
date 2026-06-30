@@ -30,23 +30,21 @@ logger = logging.getLogger(__name__)
 # ==================== PYDANTIC MODELS ====================
 
 class CardRequest(BaseModel):
-    """Kart kontrolü için gelen veri modeli"""
-    number: str = Field(..., description="Kart numarası (16 hane)", example="5549601721207035")
-    exp_month: str = Field(..., description="Son kullanma ayı (2 hane)", example="08")
-    exp_year: str = Field(..., description="Son kullanma yılı (2 veya 4 hane)", example="2026")
-    cvc: str = Field(..., description="Kart güvenlik kodu (3-4 hane)", example="319")
-    name: Optional[str] = Field("Test User", description="Kart sahibi adı")
-    country: Optional[str] = Field("US", description="Ülke kodu")
-    zip: Optional[str] = Field("00000", description="Posta kodu")
-    email: Optional[str] = Field(None, description="Email adresi")
-    phone: Optional[str] = Field(None, description="Telefon numarası")
-    dob: Optional[str] = Field(None, description="Doğum tarihi")
-    ip: Optional[str] = Field(None, description="IP adresi")
-    user_agent: Optional[str] = Field(None, description="User Agent")
+    number: str = Field(..., example="5549601721207035")
+    exp_month: str = Field(..., example="08")
+    exp_year: str = Field(..., example="2026")
+    cvc: str = Field(..., example="319")
+    name: Optional[str] = "Test User"
+    country: Optional[str] = "US"
+    zip: Optional[str] = "00000"
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    dob: Optional[str] = None
+    ip: Optional[str] = None
+    user_agent: Optional[str] = None
     
     @validator('exp_month')
     def validate_exp_month(cls, v):
-        """Ay değerini 2 haneli formata çevir"""
         v = str(v).strip()
         if len(v) == 1:
             v = f"0{v}"
@@ -54,19 +52,16 @@ class CardRequest(BaseModel):
     
     @validator('exp_year')
     def validate_exp_year(cls, v):
-        """Yıl değerini 4 haneli formata çevir (Clover API 4 hane bekliyor)"""
         v = str(v).strip()
         if len(v) == 2:
             v = f"20{v}"
         return v
 
 class BatchCardRequest(BaseModel):
-    """Batch kart kontrolü için gelen veri modeli"""
-    cards: List[CardRequest] = Field(..., description="Kart listesi", min_items=1, max_items=50)
+    cards: List[CardRequest] = Field(..., min_items=1, max_items=50)
 
 class ParseRequest(BaseModel):
-    """Parse testi için gelen veri modeli"""
-    data: Union[str, List, Dict] = Field(..., description="Parse edilecek veri")
+    data: Union[str, List, Dict] = Field(...)
 
 # ==================== KONFIGÜRASYON ====================
 CONFIG = {
@@ -128,16 +123,13 @@ class MongoDB:
     def get_bin_info(self, card_number: str) -> Optional[Dict]:
         try:
             bin_prefixes = [card_number[:6], card_number[:5], card_number[:4]]
-            
             for bin_prefix in bin_prefixes:
                 result = self.bin_collection.find_one({'BIN': bin_prefix})
                 if result:
                     if '_id' in result:
                         result['_id'] = str(result['_id'])
                     return result
-            
             return None
-            
         except Exception as e:
             logger.error(f'❌ BIN sorgulama hatası: {str(e)}')
             return None
@@ -148,11 +140,9 @@ class MongoDB:
                 data['created_at'] = datetime.now().isoformat()
             if 'updated_at' not in data:
                 data['updated_at'] = datetime.now().isoformat()
-            
             result = self.collection.insert_one(data)
             logger.info(f'✅ Kayıt eklendi: {data.get("check_id")}')
             return str(result.inserted_id)
-            
         except Exception as e:
             logger.error(f'❌ Kayıt ekleme hatası: {str(e)}')
             raise
@@ -202,47 +192,37 @@ class CardParser:
     def parse(data: Union[str, List, Dict]) -> List[CardData]:
         if isinstance(data, (list, dict)):
             return CardParser._parse_json(data)
-        
         if isinstance(data, str):
             data = data.strip()
-            
             if data.startswith('[') or data.startswith('{'):
                 try:
                     json_data = json.loads(data)
                     return CardParser._parse_json(json_data)
                 except:
                     pass
-            
             if '|' in data:
                 if len(data.split('|')) > 10:
                     return CardParser._parse_full_pipe(data)
                 else:
                     return CardParser._parse_pipe(data)
-            
             if ',' in data and '\n' in data:
                 return CardParser._parse_csv(data)
-        
         return []
     
     @staticmethod
     def _parse_pipe(data: str) -> List[CardData]:
         cards = []
         lines = data.strip().split('\n')
-        
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            
             parts = line.split('|')
-            
             if len(parts) >= 3:
                 number = parts[0].strip()
                 exp_part = parts[1].strip()
                 cvc = parts[2].strip()
-                
                 exp_month, exp_year = CardParser._parse_expiration(exp_part)
-                
                 if number and exp_month and exp_year and cvc:
                     cards.append(CardData(
                         number=number,
@@ -250,21 +230,17 @@ class CardParser:
                         exp_year=exp_year,
                         cvc=cvc
                     ))
-        
         return cards
     
     @staticmethod
     def _parse_full_pipe(data: str) -> List[CardData]:
         cards = []
         lines = data.strip().split('\n')
-        
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            
             parts = line.split('|')
-            
             if len(parts) >= 3:
                 number = parts[0].strip() if parts[0] else None
                 exp_part = parts[1].strip() if len(parts) > 1 else None
@@ -275,10 +251,8 @@ class CardParser:
                 dob = parts[11].strip() if len(parts) > 11 else None
                 ip = parts[12].strip() if len(parts) > 12 else None
                 user_agent = parts[13].strip() if len(parts) > 13 else None
-                
                 if number and exp_part and cvc:
                     exp_month, exp_year = CardParser._parse_expiration(exp_part)
-                    
                     if exp_month and exp_year:
                         cards.append(CardData(
                             number=number,
@@ -292,33 +266,25 @@ class CardParser:
                             ip=ip,
                             user_agent=user_agent
                         ))
-        
         return cards
     
     @staticmethod
     def _parse_csv(data: str) -> List[CardData]:
         cards = []
         lines = data.strip().split('\n')
-        
         header = lines[0].lower() if lines else ""
         has_header = 'card' in header or 'number' in header or 'cc' in header
-        
         start_idx = 1 if has_header else 0
-        
         for line in lines[start_idx:]:
             line = line.strip()
             if not line:
                 continue
-            
             parts = line.split(',')
-            
             if len(parts) >= 3:
                 number = parts[0].strip()
                 exp_part = parts[1].strip()
                 cvc = parts[2].strip()
-                
                 exp_month, exp_year = CardParser._parse_expiration(exp_part)
-                
                 if number and exp_month and exp_year and cvc:
                     cards.append(CardData(
                         number=number,
@@ -326,27 +292,22 @@ class CardParser:
                         exp_year=exp_year,
                         cvc=cvc
                     ))
-        
         return cards
     
     @staticmethod
     def _parse_json(data: Union[List, Dict]) -> List[CardData]:
         cards = []
-        
         if not isinstance(data, list):
             data = [data]
-        
         for item in data:
             card_data = CardParser._extract_from_json_item(item)
             if card_data:
                 cards.append(card_data)
-        
         return cards
     
     @staticmethod
     def _parse_expiration(exp_str: str) -> Tuple[Optional[str], Optional[str]]:
         exp_str = exp_str.strip()
-        
         separators = ['/', '-', '|', ' ']
         for sep in separators:
             if sep in exp_str:
@@ -354,23 +315,18 @@ class CardParser:
                 if len(parts) == 2:
                     month = parts[0].strip()
                     year = parts[1].strip()
-                    
                     if len(month) == 1:
                         month = f"0{month}"
-                    
                     if len(year) == 2:
                         year = f"20{year}"
                     elif len(year) == 4:
                         year = year
-                    
                     if month.isdigit() and year.isdigit():
                         return month, year
-        
         if exp_str.isdigit() and len(exp_str) == 4:
             return exp_str[:2], f"20{exp_str[2:]}"
         elif exp_str.isdigit() and len(exp_str) == 6:
             return exp_str[:2], exp_str[2:]
-        
         return None, None
     
     @staticmethod
@@ -380,7 +336,6 @@ class CardParser:
             exp_month = item.get('exp_month') or item.get('month')
             exp_year = item.get('exp_year') or item.get('year')
             cvc = item.get('cvc') or item.get('cvv') or item.get('CVV')
-            
             if number and exp_month and exp_year and cvc:
                 return CardData(
                     number=str(number),
@@ -388,13 +343,11 @@ class CardParser:
                     exp_year=str(exp_year),
                     cvc=str(cvc)
                 )
-        
         if 'CreditCard' in item:
             cc = item['CreditCard']
             number = cc.get('CardNumber') or cc.get('number')
             exp = cc.get('Exp') or cc.get('exp') or cc.get('expiration')
             cvc = cc.get('CVV') or cc.get('cvv') or cc.get('cvc')
-            
             if number and exp and cvc:
                 exp_month, exp_year = CardParser._parse_expiration(str(exp))
                 if exp_month and exp_year:
@@ -404,13 +357,11 @@ class CardParser:
                         exp_year=exp_year,
                         cvc=str(cvc)
                     )
-        
         if 'CardInfo' in item:
             ci = item['CardInfo']
             number = ci.get('CardNumber') or ci.get('number')
             exp = ci.get('Expiration') or ci.get('exp')
             cvc = ci.get('CVV') or ci.get('cvc')
-            
             if number and exp and cvc:
                 exp_month, exp_year = CardParser._parse_expiration(str(exp))
                 if exp_month and exp_year:
@@ -420,7 +371,6 @@ class CardParser:
                         exp_year=exp_year,
                         cvc=str(cvc)
                     )
-        
         return None
 
 
@@ -434,7 +384,6 @@ def detect_card_brand(card_number: str) -> str:
         'DISCOVER': r'^(6011|65|64[4-9]|622)',
         'JCB': r'^35'
     }
-    
     for brand, pattern in patterns.items():
         if re.match(pattern, card_number):
             return brand
@@ -449,20 +398,25 @@ class CloverProcessor:
         self.token_api = CONFIG['token_api']
         self.charge_endpoint = CONFIG['charge_endpoint']
         self.company_id = CONFIG['company_id']
-        
+    
     def create_token(self, card: CardData) -> Tuple[bool, Optional[str], Optional[str]]:
         try:
             token_url = f"{self.token_api}/v1/tokens"
             
-            # Clover Token API formatı - exp_year 4 haneli olmalı
+            brand = detect_card_brand(card.number)
+            if brand == "MASTERCARD":
+                brand = "MC"
+            
             payload = {
-                'card': {
-                    'number': card.number.strip(),
-                    'exp_month': card.exp_month.strip(),
-                    'exp_year': card.exp_year.strip(),  # Zaten 4 haneli olarak geliyor
-                    'cvv': card.cvc.strip(),
-                    'brand': detect_card_brand(card.number)
-                }
+                "card": {
+                    "number": card.number,
+                    "exp_month": card.exp_month,
+                    "exp_year": card.exp_year,
+                    "cvv": card.cvc,
+                    "brand": brand,
+                    "address_zip": "00000"
+                },
+                "multipay": False
             }
             
             logger.info(f'📤 Token payload: {json.dumps(payload)}')
@@ -502,18 +456,16 @@ class CloverProcessor:
                 'amount': 0,
                 'capture': True,
                 'tax_rate_uuid': 'FY6ZPX2PMQZM8',
+                'description': '',
                 'currency': 'USD',
-                'ecomind': 'moto',
-                'source': token,
-                'custom_attributes': {},
                 'metadata': {
                     'vt_payment_type': 'vt_checkout',
                     'source_app': 'com.clover.virtualterminal',
-                    'card_last4': card.number[-4:],
-                    'card_brand': bin_info.get('Brand') if bin_info else detect_card_brand(card.number),
-                    'bin_prefix': card.number[:6],
-                    'check_type': 'zero_dollar_verification'
-                }
+                    'existingDebtIndicator': 'false'
+                },
+                'ecomind': 'moto',
+                'source': token,
+                'custom_attributes': {}
             }
             
             headers = {
@@ -541,7 +493,6 @@ class CloverProcessor:
                     error_text = error_json.get('message', error_text)
                 except:
                     pass
-                
                 error_msg = f"HTTP {response.status_code}: {error_text}"
                 logger.error(f'❌ Charge hatası: {error_msg}')
                 return False, None, error_msg, response.json()
