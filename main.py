@@ -409,9 +409,6 @@ class MongoDB:
             self.bin_collection.create_index('BIN', unique=True)
             
             logger.info('✅ MongoDB bağlantısı başarılı')
-            logger.info(f'📁 Database: {CONFIG["mongo_database"]}')
-            logger.info(f'📂 Collection: {CONFIG["mongo_collection"]}')
-            logger.info(f'📂 BIN Collection: {CONFIG["mongo_bin_collection"]}')
             
         except ConnectionFailure as e:
             logger.error(f'❌ MongoDB bağlantı hatası: {str(e)}')
@@ -430,10 +427,8 @@ class MongoDB:
                 if result:
                     if '_id' in result:
                         result['_id'] = str(result['_id'])
-                    logger.info(f'✅ BIN bulundu: {bin_prefix}')
                     return result
             
-            logger.warning(f'⚠️ BIN bulunamadı: {card_number[:6]}')
             return None
             
         except Exception as e:
@@ -1047,71 +1042,4 @@ def health_check():
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({
-        'success': False,
-        'status': 'ERROR',
-        'error': 'Endpoint bulunamadı',
-        'code': 'NOT_FOUND'
-    }), 404
-
-@app.errorhandler(405)
-def method_not_allowed(error):
-    return jsonify({
-        'success': False,
-        'status': 'ERROR',
-        'error': 'Bu method desteklenmiyor',
-        'code': 'METHOD_NOT_ALLOWED'
-    }), 405
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({
-        'success': False,
-        'status': 'ERROR',
-        'error': 'Sunucu hatası',
-        'code': 'INTERNAL_ERROR'
-    }), 500
-
-
-# ==================== SUNUCUYU BAŞLAT ====================
-
-# Render/Heroku/Cloud için uygulama nesnesi
-application = app
-
-if __name__ == '__main__':
-    port = int(os.getenv('PORT', 3000))
-    debug = os.getenv('DEBUG', 'False').lower() == 'true'
-    
-    print('=' * 60)
-    print('🏦 Clover Card Checker API (Tam Entegrasyon)')
-    print('=' * 60)
-    print(f'📍 Sunucu: http://localhost:{port}')
-    print(f'🔧 Debug: {debug}')
-    print(f'🌍 Environment: LIVE')
-    
-    print('\n📋 API Endpoint\'leri:')
-    print('  POST /api/v1/check        - Kart kontrolü (0$ capture)')
-    print('  POST /api/v1/check/batch  - Toplu kart kontrolü')
-    print('  POST /api/v1/parse        - Sadece parse test')
-    print('  GET  /api/v1/bin/<card>   - BIN kontrolü')
-    print('  GET  /api/v1/check/<id>   - Kayıt sorgula')
-    print('  GET  /api/v1/stats        - İstatistikler')
-    print('  GET  /health              - Sağlık kontrolü')
-    
-    print('\n📝 Desteklenen Formatlar:')
-    print('  ✅ JSON: {"number": "...", "exp_month": "...", "exp_year": "...", "cvc": "..."}')
-    print('  ✅ Pipe: "number|month|year|cvc"')
-    print('  ✅ JSON Array: [{"number": "...", ...}]')
-    print('  ✅ CreditCard: {"CreditCard": {"CardNumber": "...", "Exp": "...", "CVV": "..."}}')
-    print('  ✅ CardInfo: {"CardInfo": {"CardNumber": "...", "Expiration": "...", "CVV": "..."}}')
-    print('  ✅ CSV: "CardNumber,Expiry,CVV"')
-    
-    print('\n💳 0$ Capture Akışı:')
-    print('  1. Kart verisi parse edilir (otomatik format tespiti)')
-    print('  2. BIN check yapılır (MongoDB)')
-    print('  3. Token oluşturulur (Clover)')
-    print('  4. 0$ Capture=true charge yapılır')
-    print('  5. Sonuç MongoDB\'ye kaydedilir')
-    print('=' * 60)
-    
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    return json
