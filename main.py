@@ -61,7 +61,7 @@ class ParseRequest(BaseModel):
 # ==================== KONFIGÜRASYON ====================
 CONFIG = {
     'paypal_client_id': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
-    'paypal_client_secret': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
+    'paypal_client_secret': 'EDdrMKnpxsjdk_MaGcAbTUP_boVPh8jx0w1HNu8c18nbC2j8nL0b1FFYjH0eJSFcPyewmDQv6T0as9n5',
     'paypal_api_base': 'https://api-m.paypal.com',
     'mongo_uri': 'mongodb+srv://cardmarketApp:gnbqHdTrlceMZjOS@paymentmanger.gvaavzc.mongodb.net/mydb?retryWrites=true&w=majority',
     'mongo_database': 'mydb',
@@ -686,3 +686,11 @@ if __name__ == '__main__':
     print(f'🔐 PayPal Client ID: {CONFIG["paypal_client_id"][:10]}...')
     print('=' * 60)
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=debug, log_level="info")
+
+
+    # PayPal token almayı test et
+curl -X POST "https://api-m.sandbox.paypal.com/v1/oauth2/token" \
+  -H "Accept: application/json" \
+  -H "Accept-Language: en_US" \
+  -u "YOUR_CLIENT_ID:YOUR_CLIENT_SECRET" \
+  -d "grant_type=client_credentials"
