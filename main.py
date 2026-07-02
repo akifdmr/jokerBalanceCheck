@@ -19,16 +19,20 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from enum import Enum
-from fastapi import FastAPI, HTTPException, Request
+
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel, Field, validator
+
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, CollectionInvalid
+
 import uvicorn
 import base64
 import httpx
+
 from authorizenet import apicontractsv1
-# ====== AUTHORIZE.NET RESMI SDK ======
+from authorizenet import createTransactionController   # <-- Eksik import eklendi
 
 # ==================== LOGGING ====================
 logging.basicConfig(
@@ -130,7 +134,7 @@ class BinCheckRequest(BaseModel):
 class AuthOnlyRequest(BaseModel):
     amount: float = Field(..., gt=0, description="Yetkilendirme miktarı")
     card_number: str = Field(..., min_length=15, max_length=16, description="Kredi kartı numarası")
-    exp_date: str = Field(..., pattern=r'^\d{4}-\d{2}$', description="YYYY-MM formatında son kullanma tarihi")
+    exp_date: str = Field(..., pattern=r'^\d{4}-\d{2}$', example="2026-08", description="YYYY-MM formatında son kullanma tarihi")
     cvv: str = Field(..., min_length=3, max_length=4, description="Güvenlik kodu")
     first_name: Optional[str] = Field("John", description="Ad")
     last_name: Optional[str] = Field("Doe", description="Soyad")
@@ -145,6 +149,23 @@ class AuthOnlyRequest(BaseModel):
 class CaptureRequest(BaseModel):
     transaction_id: str = Field(..., description="Yetkilendirme işleminden alınan transaction ID")
     amount: float = Field(..., gt=0, description="Yakalanacak miktar")
+
+# --- Yeni: Live/Balance için tek bir string alanı ---
+class CheckRequest(BaseModel):
+    data: str = Field(
+        ...,
+        description="""
+Kart bilgilerini aşağıdaki formatlardan biriyle gönderin (çoklu kartlar için her satıra bir kart):
+
+- PIPE: 5549601721207035|08|2026|319
+- CSV: 5549601721207035,08/2026,319
+- SPACE: 5549601721207035 08/26 319
+- JSON: {"number":"5549601721207035","exp_month":"08","exp_year":"2026","cvc":"319"}
+- TUPLE: ('John Doe','555-1234','5549601721207035','08','2026','319','...')
+- FULL PIPE: 5549601721207035|08|2026|319|John Doe|...|...|...|...|...|phone|email|dob|ip|user_agent
+        """,
+        example="5549601721207035|08|2026|319"
+    )
 
 # ==================== MONGODB ====================
 class MongoDB:
@@ -1206,20 +1227,10 @@ async def health_check():
 
 # ---------- PayPal Endpoint'leri ----------
 @app.post("/api/v1/check/live", response_class=PlainTextResponse, tags=["Live Check"])
-async def check_live(request: Request):
-    """Çoklu format desteği ile Live Check (PayPal Vault Setup + Confirm)
-    Desteklenen formatlar: JSON, pipe (|), CSV, space, tuple, full pipe
-    Çıktı: pipe formatında (pan|exp|exp_year|cvc|token|country|issuer|type|level|balance)
-    """
+async def check_live(req: CheckRequest):
+    """Live Check (PayPal Vault Setup + Confirm) – çoklu format desteği"""
     try:
-        body = await request.body()
-        text = body.decode('utf-8')
-        try:
-            data = json.loads(text)
-        except:
-            data = text
-
-        cards = CardParser.parse(data)
+        cards = CardParser.parse(req.data)
         if not cards:
             return PlainTextResponse("HATA: Geçerli kart bulunamadı", status_code=400)
 
@@ -1232,23 +1243,13 @@ async def check_live(request: Request):
         raise HTTPException(500, str(e))
 
 @app.post("/api/v1/check/balance", response_class=PlainTextResponse, tags=["Balance Check"])
-async def check_balance(request: Request):
-    """Çoklu format desteği ile Balance Check (PayPal Authorization + Void)
-    Desteklenen formatlar: JSON, pipe (|), CSV, space, tuple, full pipe
-    Çıktı: pipe formatında (pan|exp|exp_year|cvc|token|country|issuer|type|level|balance)
-    """
+async def check_balance(req: CheckRequest):
+    """Balance Check (PayPal Authorization + Void) – çoklu format desteği"""
     try:
         if not mongo_db:
             raise HTTPException(500, "MongoDB bağlantısı yok")
 
-        body = await request.body()
-        text = body.decode('utf-8')
-        try:
-            data = json.loads(text)
-        except:
-            data = text
-
-        cards = CardParser.parse(data)
+        cards = CardParser.parse(req.data)
         if not cards:
             return PlainTextResponse("HATA: Geçerli kart bulunamadı", status_code=400)
 
