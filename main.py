@@ -367,9 +367,19 @@ class CardParser:
             parts = line.split('|')
             if len(parts) >= 3:
                 number = parts[0].strip()
-                exp_part = parts[1].strip()
-                cvc = parts[2].strip()
-                exp_month, exp_year = CardParser._parse_expiration(exp_part)
+                # ✅ DÜZELTİLDİ: 4 parçalı format (pan|ay|yıl|cvc) desteği
+                if len(parts) >= 4 and parts[1].strip().isdigit() and len(parts[1].strip()) == 2 and parts[2].strip().isdigit() and (len(parts[2].strip()) == 2 or len(parts[2].strip()) == 4):
+                    exp_month = parts[1].strip()
+                    exp_year = parts[2].strip()
+                    cvc = parts[3].strip()
+                    if len(exp_year) == 2:
+                        exp_year = f"20{exp_year}"
+                else:
+                    # Standart format (pan|ay/yıl|cvc)
+                    exp_part = parts[1].strip()
+                    cvc = parts[2].strip()
+                    exp_month, exp_year = CardParser._parse_expiration(exp_part)
+
                 if number and exp_month and exp_year and cvc:
                     cards.append(CardData(
                         number=number,
@@ -698,7 +708,8 @@ class PayPalProcessor:
                 "PayPal-Request-Id": check_id,
                 "Prefer": "return=representation"
             }
-            payload = {"setup_token": {"id": setup_token}}
+            # ✅ DÜZELTİLDİ: PayPal doğru format
+            payload = {"id": setup_token}
             logger.info(f"🔄 Payment Token confirm ediliyor (setup_token: {setup_token})")
 
             response = await self.client.post(confirm_url, json=payload, headers=headers)
