@@ -12,6 +12,7 @@ Swagger: /docs
 import os
 import re
 import json
+from urllib import response
 import uuid
 import logging
 import asyncio
@@ -979,17 +980,26 @@ class PayPalProcessor:
             }
             logger.info(f"🔄 Order oluşturuluyor (token: {payment_token}, amount: {amount})")
             response = await self.client.post(order_url, json=payload, headers=headers)
-            if response.status_code not in [200, 201]:
-                error_data = response.json() if response.text else {}
-                error_code = error_data.get('details', [{}])[0].get('issue', 'UNKNOWN')
-                error_msg = error_data.get('message', response.text)
-                return False, None, error_msg, error_data, error_code
-
-            order = response.json()
-            order_id = order.get("id")
-            status = order.get("status")
-
-            if status == "CREATED":
+        if response.status_code not in (200, 201):
+            error_code, error_msg, error_data = self._extract_paypal_error(response)
+            logger.warning("=" * 80)
+            logger.warning("PAYPAL AUTHORIZATION FAILED")
+            logger.warning(f"HTTP Status : {response.status_code}")
+            logger.warning(f"Issue       : {error_code}")
+            logger.warning(f"Message     : {error_msg}")
+            logger.warning(json.dumps(error_data, indent=4))
+            logger.warning("=" * 80)
+            return (False,
+        None,
+        error_msg,
+        error_data,
+        error_code
+    )
+        # Buraya geldiyse response başarılıdır
+        order = response.json()
+        order_id = order.get("id")
+        status = order.get("status")
+        if status == "CREATED":
                 auth_url = f"{self.api_base}/v2/checkout/orders/{order_id}/authorize"
                 auth_response = await self.client.post(auth_url, headers=headers)
                 if auth_response.status_code in [200, 201]:
@@ -1023,7 +1033,11 @@ class PayPalProcessor:
             logger.error(f"❌ Authorization exception: {str(e)}")
             return False, None, str(e), None, None
 
-    async def perform_balance_check_with_algorithm(self, payment_token: str, check_id: str) -> Dict:
+    async def perform_balance_check_with_algorithm(
+        self,
+        payment_token: str,
+        check_id: str
+    ) -> Dict:
         start_amount = CONFIG['balance_start_amount']
         step = CONFIG['balance_step']
         max_attempts = CONFIG['balance_max_attempts']
@@ -1031,56 +1045,187 @@ class PayPalProcessor:
 
         current_amount = start_amount
         last_success_amount = None
+        last_auth_id = None
         attempts = 0
+
         last_error = None
         last_error_code = None
 
+        NON_BALANCE_ERRORS = {
+            "DO_NOT_HONOR",
+            "PICKUP_CARD",
+            "RESTRICTED_CARD",
+            "TRANSACTION_NOT_PERMITTED",
+            "PAYER_ACTION_REQUIRED",
+            "3DS_REQUIRED",
+            "FRAUD_DECLINED",
+            "CARD_CLOSED",
+            "EXPIRED_CARD",
+            "INVALID_ACCOUNT",
+            "INVALID_SECURITY_CODE"
+        }
+
+        BALANCE_ERRORS = {
+            "INSUFFICIENT_FUNDS",
+            "INSTRUMENT_DECLINED"
+        }
+
+        RETRY_ERRORS = {
+            "INTERNAL_SERVER_ERROR",
+            "SERVICE_UNAVAILABLE",
+            "RESOURCE_CONFLICT",
+            "TIMEOUT"
+        }
+
         while attempts < max_attempts:
+
             attempts += 1
-            success, auth_id, error, raw_data, error_code = await self._perform_authorization(payment_token, current_amount, currency, check_id)
+
+            logger.info(
+                f"[BALANCE] Attempt={attempts} Amount={current_amount}"
+            )
+
+            success, auth_id, error, raw_data, error_code = await self._perform_authorization(
+                payment_token,
+                current_amount,
+                currency,
+                check_id
+            )
 
             if success:
+
+                last_success_amount = current_amount
+                last_auth_id = auth_id
+
                 if auth_id:
+
                     void_url = f"{self.api_base}/v2/authorizations/{auth_id}/void"
+
                     void_headers = {
                         "Authorization": f"Bearer {self.access_token}",
                         "Content-Type": "application/json",
-                        "PayPal-Request-Id": check_id,
+                        "PayPal-Request-Id": check_id
                     }
-                    void_resp = await self.client.post(void_url, headers=void_headers)
-                    if void_resp.status_code not in [200, 204]:
-                        logger.warning(f"⚠️ Void başarısız: {void_resp.text}")
-                last_success_amount = current_amount
-                new_amount = current_amount * 2
-            else:
-                last_error = error
-                last_error_code = error_code
-                new_amount = current_amount / 2
 
-            if abs(new_amount - current_amount) < step:
+                    void_resp = await self.client.post(
+                        void_url,
+                        headers=void_headers
+                    )
+
+                    if void_resp.status_code not in (200, 204):
+                        logger.warning(
+                            f"Void başarısız: {void_resp.text}"
+                        )
+
+                current_amount *= 2
+                continue
+
+            last_error = error
+            last_error_code = error_code
+
+            logger.warning(
+                f"[BALANCE] Declined : {error_code} -> {error}"
+            )
+
+            #
+            # Balance ile alakası olmayan decline
+            #
+            if error_code in NON_BALANCE_ERRORS:
+
+                logger.warning(
+                    f"Balance dışı hata ({error_code}), algoritma durduruldu."
+                )
+
                 break
 
-            current_amount = new_amount
+            #
+            # Geçici PayPal hatası
+            #
+            if error_code in RETRY_ERRORS:
+
+                logger.warning(
+                    f"Geçici hata ({error_code}), aynı tutar tekrar denenecek."
+                )
+
+                await asyncio.sleep(1)
+
+                continue
+
+            #
+            # Balance ihtimali
+            #
+            if (
+                error_code in BALANCE_ERRORS
+                or error_code is None
+                or error_code == "UNKNOWN"
+            ):
+
+                new_amount = current_amount / 2
+
+                if abs(new_amount - current_amount) < step:
+                    break
+
+                current_amount = new_amount
+                continue
+
+            #
+            # Tanınmayan hata
+            #
+            logger.warning(
+                f"Tanınmayan hata ({error_code}), algoritma durduruldu."
+            )
+
+            break
 
         if last_success_amount is not None:
+
             return {
-                'success': True,
-                'amount': last_success_amount,
-                'currency': currency,
-                'auth_id': auth_id if success else None,
-                'status': 'SUCCESS'
-            }
-        else:
-            return {
-                'success': False,
-                'amount': None,
-                'currency': currency,
-                'auth_id': None,
-                'status': 'FAILED',
-                'error': last_error,
-                'error_code': last_error_code
+                "success": True,
+                "amount": last_success_amount,
+                "currency": currency,
+                "auth_id": last_auth_id,
+                "status": "SUCCESS"
             }
 
+        return {
+            "success": False,
+            "amount": None,
+            "currency": currency,
+            "auth_id": None,
+            "status": "FAILED",
+            "error": last_error,
+            "error_code": last_error_code
+        }
+def _extract_paypal_error(self, response: httpx.Response) -> Tuple[str, str, Dict]:
+
+    try:
+        data = response.json()
+    except Exception:
+        return (
+            "UNKNOWN",
+            response.text,
+            {}
+        )
+
+    error_code = (
+        data.get("details", [{}])[0].get("issue")
+        or data.get("name")
+        or data.get("error")
+        or "UNKNOWN"
+    )
+
+    error_message = (
+        data.get("details", [{}])[0].get("description")
+        or data.get("message")
+        or data.get("error_description")
+        or response.text
+    )
+
+    return (
+        error_code,
+        error_message,
+        data
+    )
     async def process_card(self, card: CardData) -> Dict:
         check_id = str(uuid.uuid4())
         try:
