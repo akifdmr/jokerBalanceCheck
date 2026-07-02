@@ -1,8 +1,9 @@
 """
-PAYPAL CARD CHECKER API - FASTAPI v12.0.0
-- Live Check (Vault Setup + Confirm)
-- Adaptif Balance Check (miktar 2 katına çıkar, başarısızsa yarıya düşer, ±100$ dur)
-- Çoklu format desteği (JSON, pipe, CSV, space, tuple, boşluklu pipe, vb.)
+PAYPAL + AUTHORIZE.NET CARD CHECKER API - FASTAPI v12.1.0
+- PayPal Live Check (Vault Setup + Confirm)
+- PayPal Adaptif Balance Check (Authorization + Void)
+- Authorize.net Auth Only + Capture
+- Çoklu format desteği (JSON, pipe, CSV, space, tuple, vb.)
 - Her kart işlemi arasında 2-3 saniye bekleme (rate-limit)
 - Async HTTP (httpx), Idempotency, Gelişmiş hata yönetimi
 - MongoDB ile kart önbellekleme (live_cards)
@@ -27,6 +28,10 @@ import uvicorn
 import base64
 import httpx
 
+# ==================== AUTHORIZE.NET SDK ====================
+from authorizenet import apicontractsv1
+from authorizenet.apicontrollers import createTransactionController
+
 # ==================== LOGGING ====================
 logging.basicConfig(
     level=logging.INFO,
@@ -37,17 +42,24 @@ logger = logging.getLogger(__name__)
 
 # ==================== KONFIGÜRASYON ====================
 CONFIG = {
+    # PayPal
     'paypal_client_id': 'AexXX36fYkQu_BFsmXISn-6ZRZaU6_Lm-q2BmsCLPLqiz3zt7lhKxc3x13UTWXADXkonA8wbeNKY0ZDW',
     'paypal_client_secret': 'EDdrMKnpxsjdk_MaGcAbTUP_boVPh8jx0w1HNu8c18nbC2j8nL0b1FFYjH0eJSFcPyewmDQv6T0as9n5',
     'paypal_api_base': 'https://api-m.paypal.com',
+    # MongoDB
     'mongo_uri': 'mongodb+srv://cardmarketApp:gnbqHdTrlceMZjOS@paymentmanger.gvaavzc.mongodb.net/mydb?retryWrites=true&w=majority',
     'mongo_database': 'mydb',
     'mongo_bin_collection': 'binList',
     'mongo_live_collection': 'live_cards',
+    # PayPal Balance
     'balance_start_amount': 1000.0,
     'balance_step': 100.0,
     'balance_max_attempts': 10,
-    'request_delay_seconds': 2.5  # Her kart işlemi arası bekleme (2-3 saniye arası)
+    'request_delay_seconds': 2.5,
+    # Authorize.net
+    'authorize_api_login_id': '6Px6beH4B4T',
+    'authorize_transaction_key': '34677Ck24M5zvuTM',
+    'authorize_public_client_key': '4gxGF4UKy6F2hg6t7G3nCZGnq73x4sPKTAFeFrhmVkK9wpb84s8X763xdz84d4Uy',
 }
 
 # ==================== PAYPAL HATA KODLARI ====================
@@ -116,6 +128,25 @@ class CardRequest(BaseModel):
 
 class BinCheckRequest(BaseModel):
     bins: Union[str, List[str]] = Field(..., description="Tek veya çoklu BIN (kart numarası veya ilk 6 hane)")
+
+class AuthOnlyRequest(BaseModel):
+    amount: float = Field(..., gt=0, description="Yetkilendirme miktarı")
+    card_number: str = Field(..., min_length=15, max_length=16)
+    exp_date: str = Field(..., regex=r'^\d{4}-\d{2}$', description="YYYY-MM formatında son kullanma tarihi")
+    cvv: str = Field(..., min_length=3, max_length=4)
+    first_name: Optional[str] = "John"
+    last_name: Optional[str] = "Doe"
+    address: Optional[str] = "123 Main St"
+    city: Optional[str] = "Anytown"
+    state: Optional[str] = "CA"
+    zip: Optional[str] = "12345"
+    country: Optional[str] = "USA"
+    invoice_number: Optional[str] = "INV-001"
+    description: Optional[str] = "Test Auth Only"
+
+class CaptureRequest(BaseModel):
+    transaction_id: str = Field(..., description="Yetkilendirme işleminden alınan transaction ID")
+    amount: float = Field(..., gt=0, description="Yakalanacak miktar")
 
 # ==================== MONGODB ====================
 class MongoDB:
@@ -245,7 +276,7 @@ except Exception as e:
     logger.error(f'❌ MongoDB başlatılamadı: {str(e)}')
     mongo_db = None
 
-# ==================== PARSER (GELİŞMİŞ) ====================
+# ==================== PARSER ====================
 @dataclass
 class CardData:
     number: str
@@ -278,7 +309,6 @@ class CardParser:
             if not data:
                 return []
 
-            # JSON
             if data.startswith('[') or data.startswith('{'):
                 try:
                     json_data = json.loads(data)
@@ -286,24 +316,19 @@ class CardParser:
                 except:
                     pass
 
-            # Tuple formatı (satır başı '(' ile başlıyorsa)
             lines = data.split('\n')
             if lines and lines[0].strip().startswith('('):
                 return CardParser._parse_tuple_format(data)
 
-            # Full pipe (en az 10 sütun)
             if '|' in data and len(data.split('|')) > 10:
                 return CardParser._parse_full_pipe(data)
 
-            # Pipe
             if '|' in data:
                 return CardParser._parse_pipe(data)
 
-            # CSV
             if ',' in data and '\n' in data:
                 return CardParser._parse_csv(data)
 
-            # Space (boşlukla ayrılmış)
             if ' ' in data and '\n' in data:
                 return CardParser._parse_space(data)
 
@@ -429,8 +454,6 @@ class CardParser:
             line = line.strip()
             if not line:
                 continue
-            # Boşlukla ayrılmış, bazen pipe ile karışık
-            # Önce pipe varsa pipe parser'ı kullan
             if '|' in line:
                 return CardParser._parse_pipe(data)
             parts = line.split()
@@ -461,19 +484,15 @@ class CardParser:
 
     @staticmethod
     def _parse_tuple_format(data: str) -> List[CardData]:
-        """Tuple formatı: (id, name, phone, card_number, exp_month, exp_year, cvc, ...)"""
         cards = []
         for line in data.strip().split('\n'):
             line = line.strip()
             if not line or not line.startswith('('):
                 continue
             try:
-                # Tuple'ı Python listesine çevir
                 line_clean = line.replace('(', '').replace(')', '').strip()
                 parts = [p.strip().strip("'\"") for p in line_clean.split(',')]
                 if len(parts) >= 7:
-                    # Beklenen sıralama: id, name, phone, card_number, exp_month, exp_year, cvc, ...
-                    # Bazı tuple'lar farklı sırada olabilir, ama genelde card_number 4. indeks, exp_month 5, exp_year 6, cvc 7
                     card_number = parts[3].strip()
                     exp_month = str(parts[4]).strip()
                     exp_year = str(parts[5]).strip()
@@ -481,7 +500,6 @@ class CardParser:
                     name = parts[1].strip() if len(parts) > 1 else "Test User"
                     phone = parts[2].strip() if len(parts) > 2 else None
                     if card_number and exp_month and exp_year and cvc:
-                        # Tarih formatını düzelt (6 -> 2026 gibi)
                         if len(exp_year) == 2:
                             exp_year = f"20{exp_year}"
                         if len(exp_month) == 1:
@@ -502,7 +520,6 @@ class CardParser:
     @staticmethod
     def _parse_expiration(exp_str: str) -> Tuple[Optional[str], Optional[str]]:
         exp_str = exp_str.strip()
-        # Ayraçlarla dene
         for sep in ['/', '-', '|', ' ', '.']:
             if sep in exp_str:
                 parts = exp_str.split(sep)
@@ -517,7 +534,6 @@ class CardParser:
                         year = year
                     if month.isdigit() and year.isdigit():
                         return month, year
-        # Sayısal dizi (MMYY veya MMYYYY)
         if exp_str.isdigit():
             if len(exp_str) == 4:
                 return exp_str[:2], f"20{exp_str[2:]}"
@@ -527,7 +543,6 @@ class CardParser:
 
     @staticmethod
     def _extract_from_json_item(item: Dict) -> Optional[CardData]:
-        # Standart alanlar
         if 'number' in item:
             number = item.get('number')
             exp_month = item.get('exp_month') or item.get('month')
@@ -540,7 +555,6 @@ class CardParser:
                     exp_year=str(exp_year),
                     cvc=str(cvc)
                 )
-        # CreditCard nesnesi (farklı anahtar isimleri)
         if 'CreditCard' in item:
             cc = item['CreditCard']
             number = cc.get('CardNumber') or cc.get('number')
@@ -557,7 +571,6 @@ class CardParser:
                         cvc=str(cvc),
                         name=name
                     )
-        # CardInfo
         if 'CardInfo' in item:
             ci = item['CardInfo']
             number = ci.get('CardNumber') or ci.get('number')
@@ -610,7 +623,7 @@ def build_pipe_response(result: Dict) -> str:
         balance = ''
     return f"{pan}|{exp}|{exp_year}|{cvc}|{token}|{country}|{issuer}|{card_type}|{level}|{balance}"
 
-# ==================== PAYPAL PROCESSOR (ASYNC) ====================
+# ==================== PAYPAL PROCESSOR ====================
 class PayPalProcessor:
     def __init__(self):
         self.client_id = CONFIG['paypal_client_id']
@@ -1012,18 +1025,100 @@ class PayPalProcessor:
                 'balance_amount': None
             }
 
+# ==================== AUTHORIZE.NET FONKSİYONLARI ====================
+def authorize_only(request_data: AuthOnlyRequest):
+    merchantAuth = apicontractsv1.merchantAuthenticationType()
+    merchantAuth.name = CONFIG['authorize_api_login_id']
+    merchantAuth.transactionKey = CONFIG['authorize_transaction_key']
+
+    creditCard = apicontractsv1.creditCardType()
+    creditCard.cardNumber = request_data.card_number
+    creditCard.expirationDate = request_data.exp_date
+    creditCard.cardCode = request_data.cvv
+
+    payment = apicontractsv1.paymentType()
+    payment.creditCard = creditCard
+
+    billTo = apicontractsv1.customerAddressType()
+    billTo.firstName = request_data.first_name
+    billTo.lastName = request_data.last_name
+    billTo.address = request_data.address
+    billTo.city = request_data.city
+    billTo.state = request_data.state
+    billTo.zip = request_data.zip
+    billTo.country = request_data.country
+
+    order = apicontractsv1.orderType()
+    order.invoiceNumber = request_data.invoice_number
+    order.description = request_data.description
+
+    transactionRequest = apicontractsv1.transactionRequestType()
+    transactionRequest.transactionType = "authOnlyTransaction"
+    transactionRequest.amount = str(request_data.amount)
+    transactionRequest.payment = payment
+    transactionRequest.billTo = billTo
+    transactionRequest.order = order
+
+    createRequest = apicontractsv1.createTransactionRequest()
+    createRequest.merchantAuthentication = merchantAuth
+    createRequest.refId = "AuthOnly-" + str(int(datetime.now().timestamp()))
+    createRequest.transactionRequest = transactionRequest
+
+    controller = createTransactionController(createRequest)
+    controller.execute()
+    return controller.getresponse()
+
+def capture_prior_auth(transaction_id: str, amount: float):
+    merchantAuth = apicontractsv1.merchantAuthenticationType()
+    merchantAuth.name = CONFIG['authorize_api_login_id']
+    merchantAuth.transactionKey = CONFIG['authorize_transaction_key']
+
+    transactionRequest = apicontractsv1.transactionRequestType()
+    transactionRequest.transactionType = "priorAuthCaptureTransaction"
+    transactionRequest.amount = str(amount)
+    transactionRequest.refTransId = transaction_id
+
+    createRequest = apicontractsv1.createTransactionRequest()
+    createRequest.merchantAuthentication = merchantAuth
+    createRequest.refId = "Capture-" + str(int(datetime.now().timestamp()))
+    createRequest.transactionRequest = transactionRequest
+
+    controller = createTransactionController(createRequest)
+    controller.execute()
+    return controller.getresponse()
+
 # ==================== FASTAPI APP ====================
 app = FastAPI(
-    title="PayPal Card Checker API",
-    description="Live Check + Adaptif Balance Check + BIN Sorgulama (Çoklu Format)",
-    version="12.0.0",
+    title="PayPal + Authorize.net Card Checker API",
+    description="Live Check (PayPal), Adaptif Balance Check, Authorize.net Auth/Capture, BIN Sorgulama",
+    version="12.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
 
-# ==================== YARDIMCI: KART İŞLEME (GECİKMELİ) ====================
+# ==================== ENDPOINT'LER ====================
+
+@app.get("/", tags=["Root"])
+async def root():
+    return {
+        "message": "PayPal + Authorize.net Card API v12.1.0",
+        "docs": "/docs",
+        "version": "12.1.0"
+    }
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    mongo_status = 'connected' if mongo_db else 'disconnected'
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "mongodb": mongo_status,
+        "paypal": CONFIG['paypal_api_base'],
+        "authorize": "configured"
+    }
+
+# ---------- YARDIMCI: GECİKMELİ İŞLEM ----------
 async def process_cards_with_delay(cards: List[CardData], processor: PayPalProcessor, mode: str = 'live', delay: float = None) -> List[Dict]:
-    """Kartları sırayla işler, her biri arasında delay (varsayılan 2.5 sn) bekler."""
     if delay is None:
         delay = CONFIG['request_delay_seconds']
     results = []
@@ -1033,7 +1128,6 @@ async def process_cards_with_delay(cards: List[CardData], processor: PayPalProce
         if mode == 'live':
             result = await processor.process_card(card)
         elif mode == 'balance':
-            # Önce token var mı kontrol et, yoksa live yap
             existing = mongo_db.get_card_by_number(card.number) if mongo_db else None
             payment_token = existing.get('payment_token') if existing else None
             if payment_token:
@@ -1061,7 +1155,6 @@ async def process_cards_with_delay(cards: List[CardData], processor: PayPalProce
                     'balance_amount': updated.get('balance_amount')
                 }
             else:
-                # Token yok -> live yap, sonra balance
                 live_result = await processor.process_card(card)
                 if not live_result.get('success'):
                     live_result['balance_status'] = 'FAILED'
@@ -1102,28 +1195,8 @@ async def process_cards_with_delay(cards: List[CardData], processor: PayPalProce
         results.append(result)
     return results
 
-# ==================== ENDPOINT'LER ====================
-
-@app.get("/", tags=["Root"])
-async def root():
-    return {
-        "message": "PayPal Card Checker API v12 (Adaptif Balance + Çoklu Format)",
-        "docs": "/docs",
-        "version": "12.0.0"
-    }
-
-@app.get("/health", tags=["Health"])
-async def health_check():
-    mongo_status = 'connected' if mongo_db else 'disconnected'
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "mongodb": mongo_status,
-        "paypal": CONFIG['paypal_api_base']
-    }
-
-# --- LIVE CHECK (çoklu format, pipe çıktı, gecikmeli) ---
-@app.post("/api/v1/check/live", response_class=PlainTextResponse, tags=["Live Check"])
+# ---------- PAYPAL ENDPOINT'LERİ ----------
+@app.post("/api/v1/check/live", response_class=PlainTextResponse, tags=["PayPal Live Check"])
 async def check_live(request: Request):
     try:
         body = await request.body()
@@ -1145,8 +1218,7 @@ async def check_live(request: Request):
         logger.error(f"Live check hatası: {e}")
         raise HTTPException(500, str(e))
 
-# --- BALANCE CHECK (çoklu format, pipe çıktı, gecikmeli) ---
-@app.post("/api/v1/check/balance", response_class=PlainTextResponse, tags=["Balance Check"])
+@app.post("/api/v1/check/balance", response_class=PlainTextResponse, tags=["PayPal Balance Check"])
 async def check_balance(request: Request):
     try:
         if not mongo_db:
@@ -1171,7 +1243,7 @@ async def check_balance(request: Request):
         logger.error(f"Balance check hatası: {e}")
         raise HTTPException(500, str(e))
 
-# --- BIN CHECK (Tekli / Çoklu) ---
+# ---------- BIN CHECK ----------
 @app.post("/api/v1/bin/check", tags=["BIN"])
 async def bin_check(request: BinCheckRequest):
     if not mongo_db:
@@ -1206,10 +1278,9 @@ async def bin_check(request: BinCheckRequest):
             })
         else:
             results.append({"bin": clean, "error": "BIN bulunamadı"})
-    # BIN sorgulama için gecikmeye gerek yok, hemen döndür
     return {"success": True, "results": results}
 
-# --- KART SORGULAMA (JSON) ---
+# ---------- KART SORGULAMA ----------
 @app.get("/api/v1/card/{card_number}", tags=["Card"])
 async def find_card(card_number: str):
     if not mongo_db:
@@ -1222,7 +1293,56 @@ async def find_card(card_number: str):
         card['cvc'] = '***'
     return {"success": True, "card": card}
 
-# --- (Opsiyonel) Eski JSON live check ---
+# ---------- AUTHORIZE.NET ENDPOINT'LERİ ----------
+@app.post("/api/v1/authorize/auth-only", tags=["Authorize.net"])
+async def auth_only_endpoint(request: AuthOnlyRequest):
+    try:
+        response = authorize_only(request)
+        if response is not None:
+            if response.messages.resultCode == "Ok":
+                if hasattr(response.transactionResponse, 'transId'):
+                    return {
+                        "success": True,
+                        "transaction_id": response.transactionResponse.transId,
+                        "response_code": response.transactionResponse.responseCode,
+                        "message": "Yetkilendirme başarılı"
+                    }
+                else:
+                    raise HTTPException(500, "Transaction ID alınamadı")
+            else:
+                error_msg = response.messages.message[0].text if hasattr(response.messages, 'message') else "Bilinmeyen hata"
+                raise HTTPException(400, f"Yetkilendirme başarısız: {error_msg}")
+        else:
+            raise HTTPException(500, "Boş yanıt")
+    except Exception as e:
+        logger.error(f"Auth-only hatası: {e}")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/v1/authorize/capture", tags=["Authorize.net"])
+async def capture_endpoint(request: CaptureRequest):
+    try:
+        response = capture_prior_auth(request.transaction_id, request.amount)
+        if response is not None:
+            if response.messages.resultCode == "Ok":
+                if hasattr(response.transactionResponse, 'transId'):
+                    return {
+                        "success": True,
+                        "transaction_id": response.transactionResponse.transId,
+                        "response_code": response.transactionResponse.responseCode,
+                        "message": "Yakalama başarılı"
+                    }
+                else:
+                    raise HTTPException(500, "Transaction ID alınamadı")
+            else:
+                error_msg = response.messages.message[0].text if hasattr(response.messages, 'message') else "Bilinmeyen hata"
+                raise HTTPException(400, f"Yakalama başarısız: {error_msg}")
+        else:
+            raise HTTPException(500, "Boş yanıt")
+    except Exception as e:
+        logger.error(f"Capture hatası: {e}")
+        raise HTTPException(500, str(e))
+
+# ---------- LEGACY: ESKI JSON LIVE CHECK ----------
 @app.post("/api/v1/check", tags=["Legacy"])
 async def check_card_json(card_request: CardRequest):
     try:
@@ -1248,23 +1368,25 @@ async def check_card_json(card_request: CardRequest):
 
 # ==================== SUNUCUYU BAŞLAT ====================
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 3003))
+    port = int(os.getenv('PORT', 3000))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     print('=' * 70)
-    print('🏦 PayPal Card Checker API v12.0.0 (Adaptif Balance + Çoklu Format)')
+    print('🏦 PayPal + Authorize.net Card API v12.1.0 (Tam Sürüm)')
     print('=' * 70)
-    print(f'📍 Sunucu: http://localhost:{3003}')
-    print(f'📚 Swagger: http://localhost:{3003}/docs')
-    print('💳 Live check  → /api/v1/check/live  (çoklu format, pipe, gecikmeli)')
-    print('⚖️ Balance check → /api/v1/check/balance (adaptif, pipe, gecikmeli)')
-    print('🔍 BIN check   → /api/v1/bin/check (JSON)')
-    print('🔎 Find card   → /api/v1/card/{number} (JSON)')
+    print(f'📍 Sunucu: http://localhost:{port}')
+    print(f'📚 Swagger: http://localhost:{port}/docs')
+    print('💳 PayPal Live check     → /api/v1/check/live')
+    print('⚖️ PayPal Balance check   → /api/v1/check/balance')
+    print('🔍 BIN check             → /api/v1/bin/check')
+    print('🔎 Find card             → /api/v1/card/{number}')
+    print('🔐 Authorize.net Auth    → /api/v1/authorize/auth-only')
+    print('💲 Authorize.net Capture  → /api/v1/authorize/capture')
     print('⏱️  Gecikme: {} saniye/kart'.format(CONFIG['request_delay_seconds']))
     print('=' * 70)
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=3003,
+        port=port,
         reload=debug,
         log_level="info"
     )
