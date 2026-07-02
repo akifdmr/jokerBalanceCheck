@@ -1248,13 +1248,13 @@ async def check_card_json(card_request: CardRequest):
 
 # ==================== SUNUCUYU BAŞLAT ====================
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 3000))
+    port = int(os.getenv('PORT', 3003))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     print('=' * 70)
     print('🏦 PayPal Card Checker API v12.0.0 (Adaptif Balance + Çoklu Format)')
     print('=' * 70)
-    print(f'📍 Sunucu: http://localhost:{port}')
-    print(f'📚 Swagger: http://localhost:{port}/docs')
+    print(f'📍 Sunucu: http://localhost:{3003}')
+    print(f'📚 Swagger: http://localhost:{3003}/docs')
     print('💳 Live check  → /api/v1/check/live  (çoklu format, pipe, gecikmeli)')
     print('⚖️ Balance check → /api/v1/check/balance (adaptif, pipe, gecikmeli)')
     print('🔍 BIN check   → /api/v1/bin/check (JSON)')
@@ -1264,7 +1264,7 @@ if __name__ == '__main__':
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=port,
+        port=3003,
         reload=debug,
         log_level="info"
     )
