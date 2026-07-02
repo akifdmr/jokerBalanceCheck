@@ -955,7 +955,13 @@ class PayPalProcessor:
             logger.error(f"❌ PayPal exception: {str(e)}")
             return False, None, None, str(e), None
 
-    async def _perform_authorization(self, payment_token: str, amount: float, currency: str, check_id: str) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict], Optional[str]]:
+    async def _perform_authorization(
+        self,
+        payment_token: str,
+        amount: float,
+        currency: str,
+        check_id: str,
+    ) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict], Optional[str]]:
         try:
             order_url = f"{self.api_base}/v2/checkout/orders"
             headers = {
@@ -963,75 +969,192 @@ class PayPalProcessor:
                 "Content-Type": "application/json",
                 "PayPal-Request-Id": check_id,
             }
+    
             payload = {
                 "intent": "AUTHORIZE",
-                "purchase_units": [{
-                    "amount": {
-                        "currency_code": currency,
-                        "value": f"{amount:.2f}"
+                "purchase_units": [
+                    {
+                        "amount": {
+                            "currency_code": currency,
+                            "value": f"{amount:.2f}",
+                        }
                     }
-                }],
+                ],
                 "payment_source": {
                     "token": {
                         "id": payment_token,
-                        "type": "PAYMENT_TOKEN"
+                        "type": "PAYMENT_TOKEN",
                     }
-                }
+                },
             }
-            logger.info(f"🔄 Order oluşturuluyor (token: {payment_token}, amount: {amount})")
-            response = await self.client.post(order_url, json=payload, headers=headers)
-        if response.status_code not in (200, 201):
-            error_code, error_msg, error_data = self._extract_paypal_error(response)
-            logger.warning("=" * 80)
-            logger.warning("PAYPAL AUTHORIZATION FAILED")
-            logger.warning(f"HTTP Status : {response.status_code}")
-            logger.warning(f"Issue       : {error_code}")
-            logger.warning(f"Message     : {error_msg}")
-            logger.warning(json.dumps(error_data, indent=4))
-            logger.warning("=" * 80)
-            return (False,
-        None,
-        error_msg,
-        error_data,
-        error_code
-    )
-        # Buraya geldiyse response başarılıdır
-        order = response.json()
-        order_id = order.get("id")
-        status = order.get("status")
-        if status == "CREATED":
-                auth_url = f"{self.api_base}/v2/checkout/orders/{order_id}/authorize"
-                auth_response = await self.client.post(auth_url, headers=headers)
-                if auth_response.status_code in [200, 201]:
-                    auth_data = auth_response.json()
-                    auth_status = auth_data.get("status")
-                    if auth_status == "COMPLETED":
-                        authorizations = auth_data.get('purchase_units', [{}])[0].get('payments', {}).get('authorizations', [])
-                        if authorizations:
-                            auth_id = authorizations[0].get('id')
-                            if auth_id:
-                                logger.info(f"✅ Yetkilendirme başarılı: {auth_id}")
-                                return True, auth_id, None, auth_data, None
-                        if 'id' in auth_data:
-                            return True, auth_data['id'], None, auth_data, None
-                        return False, None, "Authorization ID bulunamadı", auth_data, None
-                    else:
-                        error_msg = f"Yetkilendirme başarısız: {auth_status}"
-                        logger.error(f"❌ {error_msg}")
-                        return False, None, error_msg, auth_data, None
-                else:
-                    error_data = auth_response.json() if auth_response.text else {}
-                    error_code = error_data.get('details', [{}])[0].get('issue', 'UNKNOWN')
-                    error_msg = error_data.get('message', auth_response.text)
-                    return False, None, error_msg, error_data, error_code
-         else:
-                if status == "APPROVED":
-                    return True, order_id, None, order, None
-                else:
-                    return False, None, f"Beklenmeyen sipariş durumu: {status}", order, None
+    
+            logger.info(
+                f"🔄 Order oluşturuluyor (token={payment_token}, amount={amount})"
+            )
+            response = await self.client.post(
+                order_url,
+                json=payload,
+                headers=headers,
+            )
+    
+            if response.status_code not in (200, 201):
+                error_code, error_msg, error_data = self._extract_paypal_error(
+                    response
+                )
+                logger.warning("=" * 80)
+                logger.warning("PAYPAL CREATE ORDER FAILED")
+                logger.warning(f"HTTP Status : {response.status_code}")
+                logger.warning(f"Issue       : {error_code}")
+                logger.warning(f"Message     : {error_msg}")
+                logger.warning(json.dumps(error_data, indent=4))
+                logger.warning("=" * 80)
+    
+                return (
+                    False,
+                    None,
+                    error_msg,
+                    error_data,
+                    error_code,
+                )
+    
+            order = response.json()
+    
+            order_id = order.get("id")
+            status = order.get("status")
+    
+            logger.info(f"✅ Order oluşturuldu: {order_id} (Status={status})")
+    
+            #
+            # CREATED veya APPROVED ise authorize et
+            #
+            if status in ("CREATED", "APPROVED"):
+    
+                auth_url = (
+                    f"{self.api_base}/v2/checkout/orders/{order_id}/authorize"
+                )
+    
+                logger.info(f"🔄 Order authorize ediliyor: {order_id}")
+                auth_response = await self.client.post(
+                    auth_url,
+                    headers=headers,
+                )
+    
+                if auth_response.status_code not in (200, 201):
+    
+                    error_code, error_msg, error_data = (
+                        self._extract_paypal_error(auth_response)
+                    )
+    
+                    logger.warning("=" * 80)
+                    logger.warning("PAYPAL AUTHORIZE FAILED")
+                    logger.warning(f"HTTP Status : {auth_response.status_code}")
+                    logger.warning(f"Issue       : {error_code}")
+                    logger.warning(f"Message     : {error_msg}")
+                    logger.warning(json.dumps(error_data, indent=4))
+                    logger.warning("=" * 80)
+    
+                    return (
+                        False,
+                        None,
+                        error_msg,
+                        error_data,
+                        error_code,
+                    )
+    
+                auth_data = auth_response.json()
+    
+                logger.info(
+                    f"Authorize Response Status: {auth_data.get('status')}"
+                )
+    
+                purchase_unit = auth_data.get("purchase_units", [{}])[0]
+    
+                authorizations = (
+                    purchase_unit.get("payments", {})
+                    .get("authorizations", [])
+                )
+    
+                #
+                # Authorization bulunduysa başarılı kabul et
+                #
+                if authorizations:
+    
+                    authorization = authorizations[0]
+    
+                    auth_id = authorization.get("id")
+                    auth_status = authorization.get("status")
+    
+                    logger.info(
+                        f"Authorization Status={auth_status}, ID={auth_id}"
+                    )
+    
+                    if auth_id:
+                        return (
+                            True,
+                            auth_id,
+                            None,
+                            auth_data,
+                            None,
+                        )
+    
+                #
+                # Fallback
+                #
+                if auth_data.get("id"):
+                    return (
+                        True,
+                        auth_data["id"],
+                        None,
+                        auth_data,
+                        None,
+                    )
+    
+                return (
+                    False,
+                    None,
+                    "Authorization ID bulunamadı.",
+                    auth_data,
+                    None,
+                )
+    
+            #
+            # Bazı senaryolarda doğrudan completed gelebilir.
+            #
+            if status == "COMPLETED":
+    
+                logger.info("✅ Order doğrudan COMPLETED döndü.")
+    
+                return (
+                    True,
+                    order_id,
+                    None,
+                    order,
+                    None,
+                )
+    
+            #
+            # Beklenmeyen status
+            #
+            logger.error(f"Beklenmeyen Order Status: {status}")
+    
+            return (
+                False,
+                None,
+                f"Beklenmeyen Order Status: {status}",
+                order,
+                None,
+            )
+    
         except Exception as e:
-            logger.error(f"❌ Authorization exception: {str(e)}")
-            return False, None, str(e), None, None
+            logger.exception("Authorization exception")
+    
+            return (
+                False,
+                None,
+                str(e),
+                None,
+                None,
+            )
 
     async def perform_balance_check_with_algorithm(
         self,
