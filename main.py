@@ -718,7 +718,12 @@ class PayPalProcessor:
             }
 
             payload = {
-                "id": setup_token
+                    "payment_source": {
+        "token": {
+            "id": setup_token,
+            "type": "SETUP_TOKEN"
+        }
+    }
             }
 
             logger.info("=" * 100)
