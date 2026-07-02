@@ -1,5 +1,5 @@
 """
-PAYPAL CARD CHECKER API + AUTHORIZE.NET - FASTAPI v12.1.0
+PAYPAL CARD CHECKER API + AUTHORIZE.NET - FASTAPI v12.2.0
 - Live Check (PayPal Vault Setup + Confirm)
 - Adaptif Balance Check (PayPal Authorization + Void)
 - Authorize.net Auth Only + Capture
@@ -1028,66 +1028,74 @@ class PayPalProcessor:
 # ==================== AUTHORIZE.NET FONKSİYONLARI ====================
 def authorize_only(request_data: AuthOnlyRequest):
     """Authorize.net Auth Only işlemi (sadece yetkilendirme, para çekilmez)"""
-    merchantAuth = apicontractsv1.merchantAuthenticationType()
-    merchantAuth.name = CONFIG['authorize_api_login_id']
-    merchantAuth.transactionKey = CONFIG['authorize_transaction_key']
+    try:
+        merchantAuth = apicontractsv1.merchantAuthenticationType()
+        merchantAuth.name = CONFIG['authorize_api_login_id']
+        merchantAuth.transactionKey = CONFIG['authorize_transaction_key']
 
-    creditCard = apicontractsv1.creditCardType()
-    creditCard.cardNumber = request_data.card_number
-    creditCard.expirationDate = request_data.exp_date
-    creditCard.cardCode = request_data.cvv
+        creditCard = apicontractsv1.creditCardType()
+        creditCard.cardNumber = request_data.card_number
+        creditCard.expirationDate = request_data.exp_date
+        creditCard.cardCode = request_data.cvv
 
-    payment = apicontractsv1.paymentType()
-    payment.creditCard = creditCard
+        payment = apicontractsv1.paymentType()
+        payment.creditCard = creditCard
 
-    billTo = apicontractsv1.customerAddressType()
-    billTo.firstName = request_data.first_name
-    billTo.lastName = request_data.last_name
-    billTo.address = request_data.address
-    billTo.city = request_data.city
-    billTo.state = request_data.state
-    billTo.zip = request_data.zip
-    billTo.country = request_data.country
+        billTo = apicontractsv1.customerAddressType()
+        billTo.firstName = request_data.first_name
+        billTo.lastName = request_data.last_name
+        billTo.address = request_data.address
+        billTo.city = request_data.city
+        billTo.state = request_data.state
+        billTo.zip = request_data.zip
+        billTo.country = request_data.country
 
-    order = apicontractsv1.orderType()
-    order.invoiceNumber = request_data.invoice_number
-    order.description = request_data.description
+        order = apicontractsv1.orderType()
+        order.invoiceNumber = request_data.invoice_number
+        order.description = request_data.description
 
-    transactionRequest = apicontractsv1.transactionRequestType()
-    transactionRequest.transactionType = "authOnlyTransaction"
-    transactionRequest.amount = str(request_data.amount)
-    transactionRequest.payment = payment
-    transactionRequest.billTo = billTo
-    transactionRequest.order = order
+        transactionRequest = apicontractsv1.transactionRequestType()
+        transactionRequest.transactionType = "authOnlyTransaction"
+        transactionRequest.amount = str(request_data.amount)
+        transactionRequest.payment = payment
+        transactionRequest.billTo = billTo
+        transactionRequest.order = order
 
-    createRequest = apicontractsv1.createTransactionRequest()
-    createRequest.merchantAuthentication = merchantAuth
-    createRequest.refId = "AuthOnly-" + str(int(datetime.now().timestamp()))
-    createRequest.transactionRequest = transactionRequest
+        createRequest = apicontractsv1.createTransactionRequest()
+        createRequest.merchantAuthentication = merchantAuth
+        createRequest.refId = "AuthOnly-" + str(int(datetime.now().timestamp()))
+        createRequest.transactionRequest = transactionRequest
 
-    controller = createTransactionController(createRequest)
-    controller.execute()
-    return controller.getresponse()
+        controller = createTransactionController(createRequest)
+        controller.execute()
+        return controller.getresponse()
+    except Exception as e:
+        logger.error(f"Authorize.net Auth Only hatası: {e}")
+        raise
 
 def capture_prior_auth(transaction_id: str, amount: float):
     """Authorize.net Prior Auth Capture işlemi (yetkilendirmeyi yakala)"""
-    merchantAuth = apicontractsv1.merchantAuthenticationType()
-    merchantAuth.name = CONFIG['authorize_api_login_id']
-    merchantAuth.transactionKey = CONFIG['authorize_transaction_key']
+    try:
+        merchantAuth = apicontractsv1.merchantAuthenticationType()
+        merchantAuth.name = CONFIG['authorize_api_login_id']
+        merchantAuth.transactionKey = CONFIG['authorize_transaction_key']
 
-    transactionRequest = apicontractsv1.transactionRequestType()
-    transactionRequest.transactionType = "priorAuthCaptureTransaction"
-    transactionRequest.amount = str(amount)
-    transactionRequest.refTransId = transaction_id
+        transactionRequest = apicontractsv1.transactionRequestType()
+        transactionRequest.transactionType = "priorAuthCaptureTransaction"
+        transactionRequest.amount = str(amount)
+        transactionRequest.refTransId = transaction_id
 
-    createRequest = apicontractsv1.createTransactionRequest()
-    createRequest.merchantAuthentication = merchantAuth
-    createRequest.refId = "Capture-" + str(int(datetime.now().timestamp()))
-    createRequest.transactionRequest = transactionRequest
+        createRequest = apicontractsv1.createTransactionRequest()
+        createRequest.merchantAuthentication = merchantAuth
+        createRequest.refId = "Capture-" + str(int(datetime.now().timestamp()))
+        createRequest.transactionRequest = transactionRequest
 
-    controller = createTransactionController(createRequest)
-    controller.execute()
-    return controller.getresponse()
+        controller = createTransactionController(createRequest)
+        controller.execute()
+        return controller.getresponse()
+    except Exception as e:
+        logger.error(f"Authorize.net Capture hatası: {e}")
+        raise
 
 # ==================== YARDIMCI: KART İŞLEME (GECİKMELİ) ====================
 async def process_cards_with_delay(cards: List[CardData], processor: PayPalProcessor, mode: str = 'live', delay: float = None) -> List[Dict]:
@@ -1172,7 +1180,7 @@ async def process_cards_with_delay(cards: List[CardData], processor: PayPalProce
 app = FastAPI(
     title="PayPal + Authorize.net Card Checker API",
     description="Live Check (PayPal), Adaptif Balance Check, Authorize.net Auth/Capture, BIN Sorgulama",
-    version="12.1.0",
+    version="12.2.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -1182,9 +1190,9 @@ app = FastAPI(
 @app.get("/", tags=["Root"])
 async def root():
     return {
-        "message": "PayPal + Authorize.net Card API v12.1.0",
+        "message": "PayPal + Authorize.net Card API v12.2.0",
         "docs": "/docs",
-        "version": "12.1.0"
+        "version": "12.2.0"
     }
 
 @app.get("/health", tags=["Health"])
@@ -1201,6 +1209,10 @@ async def health_check():
 # ---------- PayPal Endpoint'leri ----------
 @app.post("/api/v1/check/live", response_class=PlainTextResponse, tags=["Live Check"])
 async def check_live(request: Request):
+    """Çoklu format desteği ile Live Check (PayPal Vault Setup + Confirm)
+    Desteklenen formatlar: JSON, pipe (|), CSV, space, tuple, full pipe
+    Çıktı: pipe formatında (pan|exp|exp_year|cvc|token|country|issuer|type|level|balance)
+    """
     try:
         body = await request.body()
         text = body.decode('utf-8')
@@ -1223,6 +1235,10 @@ async def check_live(request: Request):
 
 @app.post("/api/v1/check/balance", response_class=PlainTextResponse, tags=["Balance Check"])
 async def check_balance(request: Request):
+    """Çoklu format desteği ile Balance Check (PayPal Authorization + Void)
+    Desteklenen formatlar: JSON, pipe (|), CSV, space, tuple, full pipe
+    Çıktı: pipe formatında (pan|exp|exp_year|cvc|token|country|issuer|type|level|balance)
+    """
     try:
         if not mongo_db:
             raise HTTPException(500, "MongoDB bağlantısı yok")
@@ -1297,6 +1313,7 @@ async def find_card(card_number: str):
 # ---------- Authorize.net Endpoint'leri ----------
 @app.post("/api/v1/authorize/auth-only", tags=["Authorize.net"])
 async def auth_only_endpoint(request: AuthOnlyRequest):
+    """Authorize.net Auth Only - sadece yetkilendirme (para çekilmez)"""
     try:
         response = authorize_only(request)
         if response is not None:
@@ -1321,6 +1338,7 @@ async def auth_only_endpoint(request: AuthOnlyRequest):
 
 @app.post("/api/v1/authorize/capture", tags=["Authorize.net"])
 async def capture_endpoint(request: CaptureRequest):
+    """Authorize.net Capture - daha önce yapılmış bir yetkilendirmeyi yakala (para çek)"""
     try:
         response = capture_prior_auth(request.transaction_id, request.amount)
         if response is not None:
@@ -1346,6 +1364,7 @@ async def capture_endpoint(request: CaptureRequest):
 # ---------- Legacy ----------
 @app.post("/api/v1/check", tags=["Legacy"])
 async def check_card_json(card_request: CardRequest):
+    """Eski JSON formatında Live Check (sadece tek kart)"""
     try:
         card = CardData(
             number=card_request.number,
@@ -1372,7 +1391,7 @@ if __name__ == '__main__':
     port = int(os.getenv('PORT', 3000))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     print('=' * 70)
-    print('🏦 PayPal + Authorize.net Card API v12.1.0')
+    print('🏦 PayPal + Authorize.net Card API v12.2.0')
     print('=' * 70)
     print(f'📍 Sunucu: http://localhost:{port}')
     print(f'📚 Swagger: http://localhost:{port}/docs')
