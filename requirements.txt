@@ -4,4 +4,3 @@ pymongo>=4.7.0
 httpx>=0.27.0
 pydantic>=2.7.0
 python-multipart>=0.0.9
-authorizenet>=1.0.0

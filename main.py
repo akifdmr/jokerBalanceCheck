@@ -1,10 +1,10 @@
 """
-PAYPAL + AUTHORIZE.NET CARD CHECKER API - FASTAPI v12.1.0
+PAYPAL + AUTHORIZE.NET CARD CHECKER API - FASTAPI v12.2.0
 - PayPal Live Check (Vault Setup + Confirm)
 - PayPal Adaptif Balance Check (Authorization + Void)
-- Authorize.net Auth Only + Capture
+- Authorize.net Auth Only + Capture (doğrudan REST API, SDK yok)
 - Çoklu format desteği (JSON, pipe, CSV, space, tuple, vb.)
-- Her kart işlemi arasında 2-3 saniye bekleme (rate-limit)
+- Her kart işlemi arasında 2-3 saniye bekleme
 - Async HTTP (httpx), Idempotency, Gelişmiş hata yönetimi
 - MongoDB ile kart önbellekleme (live_cards)
 Swagger: /docs
@@ -15,6 +15,10 @@ import json
 import uuid
 import logging
 import asyncio
+import base64
+import hmac
+import hashlib
+import time
 from typing import Dict, List, Optional, Tuple, Any, Union
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -25,12 +29,7 @@ from pydantic import BaseModel, Field, validator
 from pymongo import MongoClient, errors
 from pymongo.errors import ConnectionFailure
 import uvicorn
-import base64
 import httpx
-
-# ==================== AUTHORIZE.NET SDK ====================
-from authorizenet import apicontractsv1
-from authorizenet.apicontrollers import createTransactionController
 
 # ==================== LOGGING ====================
 logging.basicConfig(
@@ -56,10 +55,11 @@ CONFIG = {
     'balance_step': 100.0,
     'balance_max_attempts': 10,
     'request_delay_seconds': 2.5,
-    # Authorize.net
+    # Authorize.net (REST API)
     'authorize_api_login_id': '6Px6beH4B4T',
     'authorize_transaction_key': '34677Ck24M5zvuTM',
     'authorize_public_client_key': '4gxGF4UKy6F2hg6t7G3nCZGnq73x4sPKTAFeFrhmVkK9wpb84s8X763xdz84d4Uy',
+    'authorize_api_base': 'https://api.authorize.net/xml/v1/request.api',  # XML API endpoint
 }
 
 # ==================== PAYPAL HATA KODLARI ====================
@@ -129,6 +129,7 @@ class CardRequest(BaseModel):
 class BinCheckRequest(BaseModel):
     bins: Union[str, List[str]] = Field(..., description="Tek veya çoklu BIN (kart numarası veya ilk 6 hane)")
 
+# Authorize.net modelleri
 class AuthOnlyRequest(BaseModel):
     amount: float = Field(..., gt=0, description="Yetkilendirme miktarı")
     card_number: str = Field(..., min_length=15, max_length=16)
@@ -139,7 +140,7 @@ class AuthOnlyRequest(BaseModel):
     address: Optional[str] = "123 Main St"
     city: Optional[str] = "Anytown"
     state: Optional[str] = "CA"
-    zip: Optional[str] = "12345"
+    zip_code: Optional[str] = "12345"
     country: Optional[str] = "USA"
     invoice_number: Optional[str] = "INV-001"
     description: Optional[str] = "Test Auth Only"
@@ -623,7 +624,7 @@ def build_pipe_response(result: Dict) -> str:
         balance = ''
     return f"{pan}|{exp}|{exp_year}|{cvc}|{token}|{country}|{issuer}|{card_type}|{level}|{balance}"
 
-# ==================== PAYPAL PROCESSOR ====================
+# ==================== PAYPAL PROCESSOR (ASYNC) ====================
 class PayPalProcessor:
     def __init__(self):
         self.client_id = CONFIG['paypal_client_id']
@@ -1025,99 +1026,152 @@ class PayPalProcessor:
                 'balance_amount': None
             }
 
-# ==================== AUTHORIZE.NET FONKSİYONLARI ====================
-def authorize_only(request_data: AuthOnlyRequest):
-    merchantAuth = apicontractsv1.merchantAuthenticationType()
-    merchantAuth.name = CONFIG['authorize_api_login_id']
-    merchantAuth.transactionKey = CONFIG['authorize_transaction_key']
+# ==================== AUTHORIZE.NET REST API (SDK OLMADAN) ====================
+async def authorize_only_rest(request_data: AuthOnlyRequest) -> Dict:
+    """
+    Authorize.net Auth Only işlemi (XML API ile, SDK yok).
+    Başarılı olursa { 'success': True, 'transaction_id': ... } döndürür.
+    Hata durumunda { 'success': False, 'error': ... } döndürür.
+    """
+    # XML isteği oluştur
+    xml_request = f"""<?xml version="1.0" encoding="utf-8"?>
+<createTransactionRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+  <merchantAuthentication>
+    <name>{CONFIG['authorize_api_login_id']}</name>
+    <transactionKey>{CONFIG['authorize_transaction_key']}</transactionKey>
+  </merchantAuthentication>
+  <refId>AuthOnly-{int(time.time())}</refId>
+  <transactionRequest>
+    <transactionType>authOnlyTransaction</transactionType>
+    <amount>{request_data.amount}</amount>
+    <payment>
+      <creditCard>
+        <cardNumber>{request_data.card_number}</cardNumber>
+        <expirationDate>{request_data.exp_date}</expirationDate>
+        <cardCode>{request_data.cvv}</cardCode>
+      </creditCard>
+    </payment>
+    <billTo>
+      <firstName>{request_data.first_name}</firstName>
+      <lastName>{request_data.last_name}</lastName>
+      <address>{request_data.address}</address>
+      <city>{request_data.city}</city>
+      <state>{request_data.state}</state>
+      <zip>{request_data.zip_code}</zip>
+      <country>{request_data.country}</country>
+    </billTo>
+    <order>
+      <invoiceNumber>{request_data.invoice_number}</invoiceNumber>
+      <description>{request_data.description}</description>
+    </order>
+  </transactionRequest>
+</createTransactionRequest>"""
 
-    creditCard = apicontractsv1.creditCardType()
-    creditCard.cardNumber = request_data.card_number
-    creditCard.expirationDate = request_data.exp_date
-    creditCard.cardCode = request_data.cvv
+    headers = {
+        'Content-Type': 'text/xml',
+        'Accept': 'text/xml'
+    }
 
-    payment = apicontractsv1.paymentType()
-    payment.creditCard = creditCard
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(CONFIG['authorize_api_base'], content=xml_request, headers=headers)
+        response_text = response.text
 
-    billTo = apicontractsv1.customerAddressType()
-    billTo.firstName = request_data.first_name
-    billTo.lastName = request_data.last_name
-    billTo.address = request_data.address
-    billTo.city = request_data.city
-    billTo.state = request_data.state
-    billTo.zip = request_data.zip
-    billTo.country = request_data.country
+    # Basit XML parse (regex ile transactionId ve responseCode al)
+    # Not: Daha sağlam çözüm için defusedxml veya lxml kullanılabilir, ama lxml sorun çıkardığı için regex ile yapıyoruz.
+    import re
+    trans_id_match = re.search(r'<transactionId>(\d+)</transactionId>', response_text)
+    response_code_match = re.search(r'<responseCode>(\d+)</responseCode>', response_text)
+    result_code_match = re.search(r'<resultCode>(\w+)</resultCode>', response_text)
+    error_text_match = re.search(r'<errorText>(.+?)</errorText>', response_text)
 
-    order = apicontractsv1.orderType()
-    order.invoiceNumber = request_data.invoice_number
-    order.description = request_data.description
+    result_code = result_code_match.group(1) if result_code_match else None
+    if result_code == 'Ok':
+        trans_id = trans_id_match.group(1) if trans_id_match else None
+        if trans_id:
+            return {
+                'success': True,
+                'transaction_id': trans_id,
+                'response_code': response_code_match.group(1) if response_code_match else None
+            }
+        else:
+            return {
+                'success': False,
+                'error': 'Transaction ID alınamadı',
+                'raw_response': response_text
+            }
+    else:
+        error_msg = error_text_match.group(1) if error_text_match else 'Bilinmeyen hata'
+        return {
+            'success': False,
+            'error': error_msg,
+            'raw_response': response_text
+        }
 
-    transactionRequest = apicontractsv1.transactionRequestType()
-    transactionRequest.transactionType = "authOnlyTransaction"
-    transactionRequest.amount = str(request_data.amount)
-    transactionRequest.payment = payment
-    transactionRequest.billTo = billTo
-    transactionRequest.order = order
+async def capture_prior_auth_rest(transaction_id: str, amount: float) -> Dict:
+    """
+    Authorize.net Capture işlemi (XML API ile).
+    Başarılı olursa { 'success': True, 'transaction_id': ... } döndürür.
+    """
+    xml_request = f"""<?xml version="1.0" encoding="utf-8"?>
+<createTransactionRequest xmlns="AnetApi/xml/v1/schema/AnetApiSchema.xsd">
+  <merchantAuthentication>
+    <name>{CONFIG['authorize_api_login_id']}</name>
+    <transactionKey>{CONFIG['authorize_transaction_key']}</transactionKey>
+  </merchantAuthentication>
+  <refId>Capture-{int(time.time())}</refId>
+  <transactionRequest>
+    <transactionType>priorAuthCaptureTransaction</transactionType>
+    <amount>{amount}</amount>
+    <refTransId>{transaction_id}</refTransId>
+  </transactionRequest>
+</createTransactionRequest>"""
 
-    createRequest = apicontractsv1.createTransactionRequest()
-    createRequest.merchantAuthentication = merchantAuth
-    createRequest.refId = "AuthOnly-" + str(int(datetime.now().timestamp()))
-    createRequest.transactionRequest = transactionRequest
+    headers = {
+        'Content-Type': 'text/xml',
+        'Accept': 'text/xml'
+    }
 
-    controller = createTransactionController(createRequest)
-    controller.execute()
-    return controller.getresponse()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(CONFIG['authorize_api_base'], content=xml_request, headers=headers)
+        response_text = response.text
 
-def capture_prior_auth(transaction_id: str, amount: float):
-    merchantAuth = apicontractsv1.merchantAuthenticationType()
-    merchantAuth.name = CONFIG['authorize_api_login_id']
-    merchantAuth.transactionKey = CONFIG['authorize_transaction_key']
+    import re
+    trans_id_match = re.search(r'<transactionId>(\d+)</transactionId>', response_text)
+    result_code_match = re.search(r'<resultCode>(\w+)</resultCode>', response_text)
+    error_text_match = re.search(r'<errorText>(.+?)</errorText>', response_text)
 
-    transactionRequest = apicontractsv1.transactionRequestType()
-    transactionRequest.transactionType = "priorAuthCaptureTransaction"
-    transactionRequest.amount = str(amount)
-    transactionRequest.refTransId = transaction_id
-
-    createRequest = apicontractsv1.createTransactionRequest()
-    createRequest.merchantAuthentication = merchantAuth
-    createRequest.refId = "Capture-" + str(int(datetime.now().timestamp()))
-    createRequest.transactionRequest = transactionRequest
-
-    controller = createTransactionController(createRequest)
-    controller.execute()
-    return controller.getresponse()
+    result_code = result_code_match.group(1) if result_code_match else None
+    if result_code == 'Ok':
+        trans_id = trans_id_match.group(1) if trans_id_match else None
+        if trans_id:
+            return {
+                'success': True,
+                'transaction_id': trans_id
+            }
+        else:
+            return {
+                'success': False,
+                'error': 'Transaction ID alınamadı',
+                'raw_response': response_text
+            }
+    else:
+        error_msg = error_text_match.group(1) if error_text_match else 'Bilinmeyen hata'
+        return {
+            'success': False,
+            'error': error_msg,
+            'raw_response': response_text
+        }
 
 # ==================== FASTAPI APP ====================
 app = FastAPI(
     title="PayPal + Authorize.net Card Checker API",
     description="Live Check (PayPal), Adaptif Balance Check, Authorize.net Auth/Capture, BIN Sorgulama",
-    version="12.1.0",
+    version="12.2.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
 
-# ==================== ENDPOINT'LER ====================
-
-@app.get("/", tags=["Root"])
-async def root():
-    return {
-        "message": "PayPal + Authorize.net Card API v12.1.0",
-        "docs": "/docs",
-        "version": "12.1.0"
-    }
-
-@app.get("/health", tags=["Health"])
-async def health_check():
-    mongo_status = 'connected' if mongo_db else 'disconnected'
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "mongodb": mongo_status,
-        "paypal": CONFIG['paypal_api_base'],
-        "authorize": "configured"
-    }
-
-# ---------- YARDIMCI: GECİKMELİ İŞLEM ----------
+# ==================== YARDIMCI: KART İŞLEME (GECİKMELİ) ====================
 async def process_cards_with_delay(cards: List[CardData], processor: PayPalProcessor, mode: str = 'live', delay: float = None) -> List[Dict]:
     if delay is None:
         delay = CONFIG['request_delay_seconds']
@@ -1195,8 +1249,28 @@ async def process_cards_with_delay(cards: List[CardData], processor: PayPalProce
         results.append(result)
     return results
 
-# ---------- PAYPAL ENDPOINT'LERİ ----------
-@app.post("/api/v1/check/live", response_class=PlainTextResponse, tags=["PayPal Live Check"])
+# ==================== ENDPOINT'LER ====================
+@app.get("/", tags=["Root"])
+async def root():
+    return {
+        "message": "PayPal + Authorize.net Card API v12.2.0",
+        "docs": "/docs",
+        "version": "12.2.0"
+    }
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    mongo_status = 'connected' if mongo_db else 'disconnected'
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "mongodb": mongo_status,
+        "paypal": CONFIG['paypal_api_base'],
+        "authorize": "configured"
+    }
+
+# PayPal Endpoint'leri
+@app.post("/api/v1/check/live", response_class=PlainTextResponse, tags=["Live Check"])
 async def check_live(request: Request):
     try:
         body = await request.body()
@@ -1218,7 +1292,7 @@ async def check_live(request: Request):
         logger.error(f"Live check hatası: {e}")
         raise HTTPException(500, str(e))
 
-@app.post("/api/v1/check/balance", response_class=PlainTextResponse, tags=["PayPal Balance Check"])
+@app.post("/api/v1/check/balance", response_class=PlainTextResponse, tags=["Balance Check"])
 async def check_balance(request: Request):
     try:
         if not mongo_db:
@@ -1243,7 +1317,6 @@ async def check_balance(request: Request):
         logger.error(f"Balance check hatası: {e}")
         raise HTTPException(500, str(e))
 
-# ---------- BIN CHECK ----------
 @app.post("/api/v1/bin/check", tags=["BIN"])
 async def bin_check(request: BinCheckRequest):
     if not mongo_db:
@@ -1280,7 +1353,6 @@ async def bin_check(request: BinCheckRequest):
             results.append({"bin": clean, "error": "BIN bulunamadı"})
     return {"success": True, "results": results}
 
-# ---------- KART SORGULAMA ----------
 @app.get("/api/v1/card/{card_number}", tags=["Card"])
 async def find_card(card_number: str):
     if not mongo_db:
@@ -1293,27 +1365,20 @@ async def find_card(card_number: str):
         card['cvc'] = '***'
     return {"success": True, "card": card}
 
-# ---------- AUTHORIZE.NET ENDPOINT'LERİ ----------
+# Authorize.net Endpoint'leri (REST API)
 @app.post("/api/v1/authorize/auth-only", tags=["Authorize.net"])
 async def auth_only_endpoint(request: AuthOnlyRequest):
     try:
-        response = authorize_only(request)
-        if response is not None:
-            if response.messages.resultCode == "Ok":
-                if hasattr(response.transactionResponse, 'transId'):
-                    return {
-                        "success": True,
-                        "transaction_id": response.transactionResponse.transId,
-                        "response_code": response.transactionResponse.responseCode,
-                        "message": "Yetkilendirme başarılı"
-                    }
-                else:
-                    raise HTTPException(500, "Transaction ID alınamadı")
-            else:
-                error_msg = response.messages.message[0].text if hasattr(response.messages, 'message') else "Bilinmeyen hata"
-                raise HTTPException(400, f"Yetkilendirme başarısız: {error_msg}")
+        result = await authorize_only_rest(request)
+        if result.get('success'):
+            return {
+                "success": True,
+                "transaction_id": result['transaction_id'],
+                "response_code": result.get('response_code'),
+                "message": "Yetkilendirme başarılı"
+            }
         else:
-            raise HTTPException(500, "Boş yanıt")
+            raise HTTPException(400, f"Yetkilendirme başarısız: {result.get('error')}")
     except Exception as e:
         logger.error(f"Auth-only hatası: {e}")
         raise HTTPException(500, str(e))
@@ -1321,28 +1386,20 @@ async def auth_only_endpoint(request: AuthOnlyRequest):
 @app.post("/api/v1/authorize/capture", tags=["Authorize.net"])
 async def capture_endpoint(request: CaptureRequest):
     try:
-        response = capture_prior_auth(request.transaction_id, request.amount)
-        if response is not None:
-            if response.messages.resultCode == "Ok":
-                if hasattr(response.transactionResponse, 'transId'):
-                    return {
-                        "success": True,
-                        "transaction_id": response.transactionResponse.transId,
-                        "response_code": response.transactionResponse.responseCode,
-                        "message": "Yakalama başarılı"
-                    }
-                else:
-                    raise HTTPException(500, "Transaction ID alınamadı")
-            else:
-                error_msg = response.messages.message[0].text if hasattr(response.messages, 'message') else "Bilinmeyen hata"
-                raise HTTPException(400, f"Yakalama başarısız: {error_msg}")
+        result = await capture_prior_auth_rest(request.transaction_id, request.amount)
+        if result.get('success'):
+            return {
+                "success": True,
+                "transaction_id": result['transaction_id'],
+                "message": "Yakalama başarılı"
+            }
         else:
-            raise HTTPException(500, "Boş yanıt")
+            raise HTTPException(400, f"Yakalama başarısız: {result.get('error')}")
     except Exception as e:
         logger.error(f"Capture hatası: {e}")
         raise HTTPException(500, str(e))
 
-# ---------- LEGACY: ESKI JSON LIVE CHECK ----------
+# Legacy endpoint
 @app.post("/api/v1/check", tags=["Legacy"])
 async def check_card_json(card_request: CardRequest):
     try:
@@ -1371,16 +1428,16 @@ if __name__ == '__main__':
     port = int(os.getenv('PORT', 3000))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     print('=' * 70)
-    print('🏦 PayPal + Authorize.net Card API v12.1.0 (Tam Sürüm)')
+    print('🏦 PayPal + Authorize.net Card API v12.2.0 (SDK yok)')
     print('=' * 70)
     print(f'📍 Sunucu: http://localhost:{port}')
     print(f'📚 Swagger: http://localhost:{port}/docs')
-    print('💳 PayPal Live check     → /api/v1/check/live')
-    print('⚖️ PayPal Balance check   → /api/v1/check/balance')
-    print('🔍 BIN check             → /api/v1/bin/check')
-    print('🔎 Find card             → /api/v1/card/{number}')
-    print('🔐 Authorize.net Auth    → /api/v1/authorize/auth-only')
-    print('💲 Authorize.net Capture  → /api/v1/authorize/capture')
+    print('💳 PayPal Live check  → /api/v1/check/live')
+    print('⚖️ PayPal Balance check → /api/v1/check/balance')
+    print('🔍 BIN check          → /api/v1/bin/check')
+    print('🔎 Find card          → /api/v1/card/{number}')
+    print('🔐 Authorize.net Auth → /api/v1/authorize/auth-only (REST)')
+    print('💲 Authorize.net Capture → /api/v1/authorize/capture (REST)')
     print('⏱️  Gecikme: {} saniye/kart'.format(CONFIG['request_delay_seconds']))
     print('=' * 70)
     uvicorn.run(
