@@ -27,10 +27,8 @@ from pymongo.errors import ConnectionFailure, CollectionInvalid
 import uvicorn
 import base64
 import httpx
-
-# ====== AUTHORIZE.NET RESMI SDK ======
 from authorizenet import apicontractsv1
-from authorizenet.apicontrollers import createTransactionController
+# ====== AUTHORIZE.NET RESMI SDK ======
 
 # ==================== LOGGING ====================
 logging.basicConfig(
