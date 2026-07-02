@@ -1,9 +1,12 @@
 services:
   - type: web
-    name: balance-api
+    name: my-api
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      apt-get update
+      apt-get install -y libxml2-dev libxslt1-dev
+      pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-# render.yaml
-build:
-  pythonVersion: "3.11"  # veya "3.12"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11

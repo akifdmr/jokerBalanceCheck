@@ -129,7 +129,6 @@ class CardRequest(BaseModel):
 class BinCheckRequest(BaseModel):
     bins: Union[str, List[str]] = Field(..., description="Tek veya çoklu BIN (kart numarası veya ilk 6 hane)")
 
-# ----- Authorize.net modelleri (hata düzeltildi: regex -> pattern) -----
 class AuthOnlyRequest(BaseModel):
     amount: float = Field(..., gt=0, description="Yetkilendirme miktarı")
     card_number: str = Field(..., min_length=15, max_length=16)
