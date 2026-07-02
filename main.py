@@ -29,8 +29,8 @@ import base64
 import httpx
 
 # ==================== AUTHORIZE.NET SDK ====================
-from authorizenet import apicontractsv1  # type: ignore
-from authorizenet.apicontrollers import createTransactionController  # type: ignore
+from authorizenet import apicontractsv1
+from authorizenet.apicontrollers import createTransactionController
 
 # ==================== LOGGING ====================
 logging.basicConfig(
