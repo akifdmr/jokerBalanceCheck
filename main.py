@@ -22,15 +22,12 @@ from enum import Enum
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel, Field, validator
-from pymongo import MongoClient, errors
-from pymongo.errors import ConnectionFailure
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, CollectionInvalid
 import uvicorn
 import base64
 import httpx
 
-# ==================== AUTHORIZE.NET SDK ====================
-from authorizenet import apicontractsv1
-from authorizenet.apicontrollers import createTransactionController
 
 # ==================== LOGGING ====================
 logging.basicConfig(
@@ -168,7 +165,7 @@ class MongoDB:
 
             try:
                 self.live_cards.create_index('card_number', unique=True)
-            except errors.CollectionInvalid:
+            except CollectionInvalid:
                 pass
             self.live_cards.create_index('check_id', unique=True)
             self.live_cards.create_index('payment_token')
