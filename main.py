@@ -696,108 +696,108 @@ class PayPalProcessor:
             raise
 
     async def _confirm_setup_token(
-    self,
-    setup_token: str,
-    check_id: str
-) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
-    try:
-        if not setup_token:
-            return False, None, "Setup token boş", None
-
-        confirm_url = f"{self.api_base}/v3/vault/payment-tokens"
-
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-
-            # Aynı request id yerine yeni oluştur
-            "PayPal-Request-Id": str(uuid.uuid4()),
-
-            "Prefer": "return=representation"
-        }
-
-        payload = {
-            "id": setup_token
-        }
-
-        logger.info("=" * 100)
-        logger.info("PAYMENT TOKEN REQUEST")
-        logger.info(f"URL      : {confirm_url}")
-        logger.info(f"Setup ID : {setup_token}")
-        logger.info(f"Headers  : {headers}")
-        logger.info(f"Payload  : {json.dumps(payload, indent=4)}")
-        logger.info("=" * 100)
-
-        response = await self.client.post(
-            confirm_url,
-            json=payload,
-            headers=headers
-        )
-
-        logger.info("=" * 100)
-        logger.info("PAYMENT TOKEN RESPONSE")
-        logger.info(f"Status : {response.status_code}")
-
+        self,
+        setup_token: str,
+        check_id: str
+    ) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
         try:
-            logger.info(json.dumps(response.json(), indent=4))
-        except Exception:
-            logger.info(response.text)
+            if not setup_token:
+                return False, None, "Setup token boş", None
 
-        logger.info("=" * 100)
+            confirm_url = f"{self.api_base}/v3/vault/payment-tokens"
 
-        if response.status_code in (200, 201):
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
 
-            result = response.json()
+                # Aynı request id yerine yeni oluştur
+                "PayPal-Request-Id": str(uuid.uuid4()),
 
-            payment_token = result.get("id")
-            status = result.get("status")
+                "Prefer": "return=representation"
+            }
 
-            logger.info(f"✅ Payment Token oluşturuldu : {payment_token}")
-            logger.info(f"✅ Status : {status}")
+            payload = {
+                "id": setup_token
+            }
 
-            return True, payment_token, None, result
+            logger.info("=" * 100)
+            logger.info("PAYMENT TOKEN REQUEST")
+            logger.info(f"URL      : {confirm_url}")
+            logger.info(f"Setup ID : {setup_token}")
+            logger.info(f"Headers  : {headers}")
+            logger.info(f"Payload  : {json.dumps(payload, indent=4)}")
+            logger.info("=" * 100)
 
-        else:
+            response = await self.client.post(
+                confirm_url,
+                json=payload,
+                headers=headers
+            )
+
+            logger.info("=" * 100)
+            logger.info("PAYMENT TOKEN RESPONSE")
+            logger.info(f"Status : {response.status_code}")
 
             try:
-                error_json = response.json()
+                logger.info(json.dumps(response.json(), indent=4))
             except Exception:
-                error_json = None
+                logger.info(response.text)
 
-            if error_json:
+            logger.info("=" * 100)
 
-                logger.error("=" * 100)
-                logger.error("PAYPAL ERROR")
+            if response.status_code in (200, 201):
 
-                logger.error(f"Name     : {error_json.get('name')}")
-                logger.error(f"Message  : {error_json.get('message')}")
-                logger.error(f"Debug ID : {error_json.get('debug_id')}")
+                result = response.json()
 
-                if error_json.get("details"):
-                    for i, detail in enumerate(error_json["details"], start=1):
-                        logger.error(
-                            f"Detail {i}: "
-                            f"field={detail.get('field')} "
-                            f"issue={detail.get('issue')} "
-                            f"description={detail.get('description')}"
-                        )
+                payment_token = result.get("id")
+                status = result.get("status")
 
-                logger.error("=" * 100)
+                logger.info(f"✅ Payment Token oluşturuldu : {payment_token}")
+                logger.info(f"✅ Status : {status}")
 
-                return (
-                    False,
-                    None,
-                    json.dumps(error_json, indent=2),
-                    error_json
-                )
+                return True, payment_token, None, result
 
-            logger.error(response.text)
-            return False, None, response.text, None
+            else:
 
-    except Exception as e:
-        logger.exception("❌ Confirm exception")
-        return False, None, str(e), None
+                try:
+                    error_json = response.json()
+                except Exception:
+                    error_json = None
+
+                if error_json:
+
+                    logger.error("=" * 100)
+                    logger.error("PAYPAL ERROR")
+
+                    logger.error(f"Name     : {error_json.get('name')}")
+                    logger.error(f"Message  : {error_json.get('message')}")
+                    logger.error(f"Debug ID : {error_json.get('debug_id')}")
+
+                    if error_json.get("details"):
+                        for i, detail in enumerate(error_json["details"], start=1):
+                            logger.error(
+                                f"Detail {i}: "
+                                f"field={detail.get('field')} "
+                                f"issue={detail.get('issue')} "
+                                f"description={detail.get('description')}"
+                            )
+
+                    logger.error("=" * 100)
+
+                    return (
+                        False,
+                        None,
+                        json.dumps(error_json, indent=2),
+                        error_json
+                    )
+
+                logger.error(response.text)
+                return False, None, response.text, None
+
+        except Exception as e:
+            logger.exception("❌ Confirm exception")
+            return False, None, str(e), None
 
     async def verify_card(self, card: CardData, bin_info: Dict = None, check_id: str = None) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[Dict]]:
         try:
@@ -856,101 +856,100 @@ class PayPalProcessor:
             logger.info(response.text)
             logger.info("=" * 80)
 
-          if response.status_code in (200, 201):
+            if response.status_code in (200, 201):
 
-    result = response.json()
+                result = response.json()
 
-    logger.info("=" * 100)
-    logger.info("SETUP TOKEN RESPONSE")
-    logger.info(json.dumps(result, indent=4))
-    logger.info("=" * 100)
+                logger.info("=" * 100)
+                logger.info("SETUP TOKEN RESPONSE")
+                logger.info(json.dumps(result, indent=4))
+                logger.info("=" * 100)
 
-    setup_token = result.get("id")
-    status = result.get("status")
+                setup_token = result.get("id")
+                status = result.get("status")
 
-    if not setup_token:
-        logger.error("❌ Setup token alınamadı!")
-        return False, None, None, "Setup token alınamadı", result
+                if not setup_token:
+                    logger.error("❌ Setup token alınamadı!")
+                    return False, None, None, "Setup token alınamadı", result
 
-    logger.info(f"✅ Setup Token : {setup_token}")
-    logger.info(f"✅ Status      : {status}")
+                logger.info(f"✅ Setup Token : {setup_token}")
+                logger.info(f"✅ Status      : {status}")
 
-    # Status'u özellikle logla
-    if status not in ["APPROVED", "VAULTED", "PAYER_ACTION_REQUIRED", "CREATED"]:
-        logger.warning(f"⚠️ Beklenmeyen Setup Token Status: {status}")
+                # Status'u özellikle logla
+                if status not in ["APPROVED", "VAULTED", "PAYER_ACTION_REQUIRED", "CREATED"]:
+                    logger.warning(f"⚠️ Beklenmeyen Setup Token Status: {status}")
 
-    confirm_success, payment_token, confirm_error, confirm_raw = await self._confirm_setup_token(
-        setup_token=setup_token,
-        check_id=check_id
-    )
+                confirm_success, payment_token, confirm_error, confirm_raw = await self._confirm_setup_token(
+                    setup_token=setup_token,
+                    check_id=check_id
+                )
 
-    if confirm_success:
+                if confirm_success:
 
-        logger.info("=" * 100)
-        logger.info("PAYMENT TOKEN SUCCESS")
-        logger.info(f"Setup Token   : {setup_token}")
-        logger.info(f"Payment Token : {payment_token}")
+                    logger.info("=" * 100)
+                    logger.info("PAYMENT TOKEN SUCCESS")
+                    logger.info(f"Setup Token   : {setup_token}")
+                    logger.info(f"Payment Token : {payment_token}")
 
-        if confirm_raw:
-            logger.info(json.dumps(confirm_raw, indent=4))
+                    if confirm_raw:
+                        logger.info(json.dumps(confirm_raw, indent=4))
 
-        logger.info("=" * 100)
+                    logger.info("=" * 100)
 
-        return (
-            True,
-            setup_token,
-            payment_token,
-            None,
-            result
-        )
+                    return (
+                        True,
+                        setup_token,
+                        payment_token,
+                        None,
+                        result
+                    )
 
-    else:
+                else:
 
-        logger.warning("=" * 100)
-        logger.warning("PAYMENT TOKEN FAILED")
-        logger.warning(f"Setup Token : {setup_token}")
-        logger.warning(f"Error       : {confirm_error}")
+                    logger.warning("=" * 100)
+                    logger.warning("PAYMENT TOKEN FAILED")
+                    logger.warning(f"Setup Token : {setup_token}")
+                    logger.warning(f"Error       : {confirm_error}")
 
-        if confirm_raw:
-            try:
-                logger.warning(json.dumps(confirm_raw, indent=4))
-            except Exception:
-                logger.warning(confirm_raw)
+                    if confirm_raw:
+                        try:
+                            logger.warning(json.dumps(confirm_raw, indent=4))
+                        except Exception:
+                            logger.warning(confirm_raw)
 
-        logger.warning("=" * 100)
+                    logger.warning("=" * 100)
 
-        # Setup Token oluştuğu için kartı yine LIVE kabul ediyorsun
-        return (
-            True,
-            setup_token,
-            None,
-            confirm_error,
-            result
-        )
+                    # Setup Token oluştuğu için kartı yine LIVE kabul ediyorsun
+                    return (
+                        True,
+                        setup_token,
+                        None,
+                        confirm_error,
+                        result
+                    )
 
-else:
+            else:
+                logger.error("=" * 100)
+                logger.error("SETUP TOKEN FAILED")
+                logger.error(f"HTTP Status : {response.status_code}")
 
-    logger.error("=" * 100)
-    logger.error("SETUP TOKEN FAILED")
-    logger.error(f"HTTP Status : {response.status_code}")
+                try:
+                    error_json = response.json()
+                    logger.error(json.dumps(error_json, indent=4))
+                    error_text = error_json.get("message", response.text)
+                except Exception:
+                    logger.error(response.text)
+                    error_text = response.text
 
-    try:
-        error_json = response.json()
-        logger.error(json.dumps(error_json, indent=4))
-        error_text = error_json.get("message", response.text)
-    except Exception:
-        logger.error(response.text)
-        error_text = response.text
+                logger.error("=" * 100)
 
-    logger.error("=" * 100)
-
-    return (
-        False,
-        None,
-        None,
-        error_text,
-        None
-    )
+                return (
+                    False,
+                    None,
+                    None,
+                    error_text,
+                    None
+                )
         except Exception as e:
             logger.error(f"❌ PayPal exception: {str(e)}")
             return False, None, None, str(e), None
