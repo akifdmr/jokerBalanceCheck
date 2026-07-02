@@ -703,63 +703,102 @@ class PayPalProcessor:
         check_id: str
     ) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
 
-        if not self.access_token:
-            await self._get_access_token()
+        try:
 
-        confirm_url = f"{self.api_base}/v3/vault/payment-tokens"
+            if not setup_token:
+                return False, None, "Setup token boş.", None
 
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Prefer": "return=representation",
-            "PayPal-Request-Id": str(uuid.uuid4())
-        }
+            if not self.access_token:
+                await self._get_access_token()
 
-        payload = {
-            "payment_source": {
-                "token": {
-                    "id": setup_token,
-                    "type": "SETUP_TOKEN"
+            url = f"{self.api_base}/v3/vault/payment-tokens"
+
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Prefer": "return=representation",
+                "PayPal-Request-Id": str(uuid.uuid4())
+            }
+
+            # PayPal'ın resmi dökümantasyonundaki payload
+            payload = {
+                "payment_source": {
+                    "token": {
+                        "id": setup_token,
+                        "type": "SETUP_TOKEN"
+                    }
                 }
             }
-        }
 
-        logger.info("=" * 100)
-        logger.info("PAYMENT TOKEN REQUEST")
-        logger.info(f"URL      : {confirm_url}")
-        logger.info(f"HEADERS  : {headers}")
-        logger.info(f"PAYLOAD  : {json.dumps(payload, indent=4)}")
+            logger.info("=" * 120)
+            logger.info("PAYMENT TOKEN REQUEST")
+            logger.info(f"URL       : {url}")
+            logger.info(f"SetupToken: {setup_token}")
+            logger.info(f"Check ID  : {check_id}")
+            logger.info("Headers:")
+            logger.info(json.dumps(
+                {k: ("***" if k == "Authorization" else v) for k, v in headers.items()},
+                indent=4
+            ))
+            logger.info("Payload:")
+            logger.info(json.dumps(payload, indent=4))
+            logger.info("=" * 120)
 
-        response = await self.client.post(
-            confirm_url,
-            headers=headers,
-            json=payload
-        )
+            response = await self.client.post(
+                url,
+                headers=headers,
+                json=payload
+            )
 
-        logger.info(f"HTTP STATUS : {response.status_code}")
-        logger.info(f"RAW RESPONSE: {response.text}")
+            logger.info("=" * 120)
+            logger.info("PAYMENT TOKEN RESPONSE")
+            logger.info(f"HTTP Status : {response.status_code}")
+            logger.info(response.text)
+            logger.info("=" * 120)
 
-        try:
-            result = response.json()
-        except Exception:
-            result = None
+            try:
+                result = response.json()
+            except Exception:
+                result = {
+                    "raw": response.text
+                }
 
-        if response.status_code in (200, 201):
+            if response.status_code in (200, 201):
+
+                payment_token = result.get("id")
+                status = result.get("status")
+
+                logger.info(f"✅ Payment Token : {payment_token}")
+                logger.info(f"✅ Status        : {status}")
+
+                return (
+                    True,
+                    payment_token,
+                    None,
+                    result
+                )
+
+            logger.error("=" * 120)
+            logger.error("PAYPAL ERROR")
+            logger.error(json.dumps(result, indent=4))
+            logger.error("=" * 120)
+
             return (
-                True,
-                result.get("id"),
+                False,
                 None,
+                result.get("message", response.text),
                 result
             )
 
-        return (
-            False,
-            None,
-            response.text,
-            result
-        )
-
+        except Exception as ex:
+            logger.exception("PAYMENT TOKEN EXCEPTION")
+            return (
+                False,
+                None,
+                str(ex),
+                None
+            )
     async def verify_card(self, card: CardData, bin_info: Dict = None, check_id: str = None) -> Tuple[bool, Optional[str], Optional[str], Optional[str], Optional[Dict]]:
         try:
             if not self.access_token:
