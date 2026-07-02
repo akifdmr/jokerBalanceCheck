@@ -1024,7 +1024,7 @@ class PayPalProcessor:
                     error_code = error_data.get('details', [{}])[0].get('issue', 'UNKNOWN')
                     error_msg = error_data.get('message', auth_response.text)
                     return False, None, error_msg, error_data, error_code
-            else:
+         else:
                 if status == "APPROVED":
                     return True, order_id, None, order, None
                 else:
