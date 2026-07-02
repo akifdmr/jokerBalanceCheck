@@ -31,10 +31,14 @@ import uvicorn
 import base64
 import httpx
 
-from authorizenet import apicontractsv1
-from authorizenet import createTransactionController   # <-- Eksik import eklendi
 
-# ==================== LOGGING ====================
+
+from authorizenet import apicontractsv1
+from authorizenet.apicontrollers import (
+    createTransactionController,
+    createCustomerProfileController,
+    createCustomerPaymentProfileController,
+)# ==================== LOGGING ====================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
@@ -1085,6 +1089,7 @@ def authorize_only(request_data: AuthOnlyRequest):
         createRequest.refId = "AuthOnly-" + str(int(datetime.now().timestamp()))
         createRequest.transactionRequest = transactionRequest
 
+        from authorizenet.apicontrollers import createTransactionController
         controller = createTransactionController(createRequest)
         controller.execute()
         return controller.getresponse()
