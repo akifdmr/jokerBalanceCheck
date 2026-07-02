@@ -28,6 +28,9 @@ import uvicorn
 import base64
 import httpx
 
+# ====== AUTHORIZE.NET RESMI SDK ======
+from authorizenet import apicontractsv1
+from authorizenet.apicontrollers import createTransactionController
 
 # ==================== LOGGING ====================
 logging.basicConfig(
@@ -128,18 +131,18 @@ class BinCheckRequest(BaseModel):
 
 class AuthOnlyRequest(BaseModel):
     amount: float = Field(..., gt=0, description="Yetkilendirme miktarı")
-    card_number: str = Field(..., min_length=15, max_length=16)
+    card_number: str = Field(..., min_length=15, max_length=16, description="Kredi kartı numarası")
     exp_date: str = Field(..., pattern=r'^\d{4}-\d{2}$', description="YYYY-MM formatında son kullanma tarihi")
-    cvv: str = Field(..., min_length=3, max_length=4)
-    first_name: Optional[str] = "John"
-    last_name: Optional[str] = "Doe"
-    address: Optional[str] = "123 Main St"
-    city: Optional[str] = "Anytown"
-    state: Optional[str] = "CA"
-    zip: Optional[str] = "12345"
-    country: Optional[str] = "USA"
-    invoice_number: Optional[str] = "INV-001"
-    description: Optional[str] = "Test Auth Only"
+    cvv: str = Field(..., min_length=3, max_length=4, description="Güvenlik kodu")
+    first_name: Optional[str] = Field("John", description="Ad")
+    last_name: Optional[str] = Field("Doe", description="Soyad")
+    address: Optional[str] = Field("123 Main St", description="Adres")
+    city: Optional[str] = Field("Anytown", description="Şehir")
+    state: Optional[str] = Field("CA", description="Eyalet")
+    zip: Optional[str] = Field("12345", description="Posta kodu")
+    country: Optional[str] = Field("USA", description="Ülke")
+    invoice_number: Optional[str] = Field("INV-001", description="Fatura numarası")
+    description: Optional[str] = Field("Test Auth Only", description="Açıklama")
 
 class CaptureRequest(BaseModel):
     transaction_id: str = Field(..., description="Yetkilendirme işleminden alınan transaction ID")
